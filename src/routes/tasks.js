@@ -1,10 +1,9 @@
 const express = require('express');
+const taskStore = require('../store/taskStore');
 
 const router = express.Router();
 
-// In-memory task store
-const tasks = [];
-let nextId = 1;
+const VALID_STATUSES = ['pending', 'in_progress', 'done', 'cancelled'];
 
 /**
  * POST /tasks
@@ -18,15 +17,10 @@ router.post('/', (req, res) => {
     return res.status(400).json({ error: 'title is required' });
   }
 
-  const task = {
-    id: nextId++,
+  const task = taskStore.add({
     title: title.trim(),
     description: description ? String(description).trim() : null,
-    status: 'pending',
-    createdAt: new Date().toISOString(),
-  };
-
-  tasks.push(task);
+  });
   return res.status(201).json(task);
 });
 
@@ -35,6 +29,7 @@ router.post('/', (req, res) => {
  * List all tasks.
  */
 router.get('/', (req, res) => {
+  const tasks = taskStore.getAll();
   res.json({ tasks, total: tasks.length });
 });
 
@@ -43,7 +38,7 @@ router.get('/', (req, res) => {
  * Get a single task by id.
  */
 router.get('/:id', (req, res) => {
-  const task = tasks.find((t) => t.id === Number(req.params.id));
+  const task = taskStore.getById(req.params.id);
   if (!task) return res.status(404).json({ error: 'task not found' });
   return res.json(task);
 });
@@ -53,12 +48,7 @@ router.get('/:id', (req, res) => {
  * Update the status of a task.
  * Body: { status: 'pending' | 'in_progress' | 'done' | 'cancelled' }
  */
-const VALID_STATUSES = ['pending', 'in_progress', 'done', 'cancelled'];
-
 router.patch('/:id/status', (req, res) => {
-  const task = tasks.find((t) => t.id === Number(req.params.id));
-  if (!task) return res.status(404).json({ error: 'task not found' });
-
   const { status } = req.body || {};
   if (!status || !VALID_STATUSES.includes(status)) {
     return res.status(400).json({
@@ -66,8 +56,8 @@ router.patch('/:id/status', (req, res) => {
     });
   }
 
-  task.status = status;
-  task.updatedAt = new Date().toISOString();
+  const task = taskStore.updateStatus(req.params.id, status);
+  if (!task) return res.status(404).json({ error: 'task not found' });
   return res.json(task);
 });
 
