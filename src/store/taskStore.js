@@ -79,13 +79,14 @@ function getById(id) {
   return tasks.find((t) => t.id === Number(id));
 }
 
-function add({ title, description }) {
+function add({ title, description, executionMode }) {
   load();
   const task = {
     id: nextId++,
     title,
     description: description || null,
-    status: 'pending',
+    executionMode: executionMode || 'local',
+    status: 'received',
     createdAt: new Date().toISOString(),
   };
   tasks.push(task);
@@ -103,11 +104,26 @@ function updateStatus(id, status) {
   return task;
 }
 
+/**
+ * Apply a partial patch of execution metadata to a task and persist.
+ * Returns the updated task, or null if the task does not exist.
+ */
+function updateExecution(id, patch) {
+  load();
+  const task = tasks.find((t) => t.id === Number(id));
+  if (!task) return null;
+  Object.assign(task, patch);
+  task.updatedAt = new Date().toISOString();
+  persist();
+  return task;
+}
+
 module.exports = {
   getAll,
   getById,
   add,
   updateStatus,
+  updateExecution,
   // Exported for debugging/tests.
   _dataFile: dataFile,
 };
