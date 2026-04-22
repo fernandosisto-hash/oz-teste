@@ -1,6 +1,7 @@
 const taskStore = require('./store/taskStore');
 const ozClient = require('./ozClient');
 const { mapOzState } = require('./ozStateMap');
+const notificationService = require('./notificationService');
 
 /**
  * Task auto-sync service.
@@ -119,7 +120,17 @@ async function syncTask(taskOrId) {
   }
 
   const updated = taskStore.updateExecution(task.id, patch);
-  return { ok: true, terminal: isTerminal, task: updated };
+
+  // On transition into a terminal state, fire the notification. The
+  // service itself is idempotent (notifiedStatus guard), so double
+  // syncs do NOT produce duplicate notifications.
+  let finalTask = updated;
+  if (isTerminal) {
+    await notificationService.notifyIfTerminal(updated);
+    finalTask = taskStore.getById(task.id) || updated;
+  }
+
+  return { ok: true, terminal: isTerminal, task: finalTask };
 }
 
 /**

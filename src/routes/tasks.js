@@ -2,6 +2,7 @@ const express = require('express');
 const taskStore = require('../store/taskStore');
 const dispatcher = require('../dispatcher');
 const syncService = require('../syncService');
+const notificationStore = require('../store/notificationStore');
 
 const router = express.Router();
 
@@ -63,6 +64,19 @@ router.get('/:id', (req, res) => {
   const task = taskStore.getById(req.params.id);
   if (!task) return res.status(404).json({ error: 'task not found' });
   return res.json(task);
+});
+
+/**
+ * GET /tasks/:id/notifications
+ * List the terminal-state notification events that have been emitted
+ * for this task (usually zero or one; more if the task legitimately
+ * re-enters a different terminal state).
+ */
+router.get('/:id/notifications', (req, res) => {
+  const task = taskStore.getById(req.params.id);
+  if (!task) return res.status(404).json({ error: 'task not found' });
+  const events = notificationStore.getByTaskId(req.params.id);
+  return res.json({ notifications: events, total: events.length });
 });
 
 /**

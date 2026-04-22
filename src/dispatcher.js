@@ -2,6 +2,7 @@ const crypto = require('crypto');
 const taskStore = require('./store/taskStore');
 const ozClient = require('./ozClient');
 const { mapOzState } = require('./ozStateMap');
+const notificationService = require('./notificationService');
 
 /**
  * Task dispatcher.
@@ -240,7 +241,18 @@ async function dispatch(task, { mode } = {}) {
     lastError: result.error || result.pollError || null,
   };
 
-  return taskStore.updateExecution(task.id, patch);
+  const updated = taskStore.updateExecution(task.id, patch);
+
+  // If dispatch resolved directly to a terminal state (local, webhook,
+  // or a fast-completing Oz run), fire the terminal notification now.
+  // Long-running Oz runs will be notified by the sync service instead.
+  if (result.terminal) {
+    await notificationService.notifyIfTerminal(updated);
+    // Re-read to surface notifiedAt / notifiedStatus on the return value.
+    return taskStore.getById(task.id) || updated;
+  }
+
+  return updated;
 }
 
 module.exports = {
