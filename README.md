@@ -19,6 +19,8 @@ The server listens on `PORT` (default `3000`).
 - `GET /info` — returns package metadata, Node.js version and process uptime.
 - `POST /tasks` — intake a new task; body: `{ "title": "string", "description": "string" }`.
 - `GET /tasks` — list all tasks.
+- `GET /tasks/:id` — get a single task by id.
+- `PATCH /tasks/:id/status` — update task status; body: `{ "status": "pending|in_progress|done|cancelled" }`.
 ## Project layout
 ```
 src/
@@ -28,5 +30,5 @@ src/
     index.js      # mounts all feature routers
     health.js     # GET /health
     info.js       # GET /info
-    tasks.js      # POST /tasks, GET /tasks
+    tasks.js      # POST /tasks, GET /tasks, GET /tasks/:id, PATCH /tasks/:id/status
 ```
