@@ -214,7 +214,8 @@ async function dispatch(task, { mode } = {}) {
 
   // Transition: received -> in_progress, stamping initial metadata.
   // For 'oz' the real runId/sessionLink/runState are filled in by runOz
-  // after the API call succeeds.
+  // after the API call succeeds. `timedOut` is reset here so a replay
+  // (retry / re-dispatch) doesn't carry forward a stale timeout flag.
   taskStore.updateExecution(task.id, {
     status: 'in_progress',
     dispatchedAt,
@@ -226,6 +227,8 @@ async function dispatch(task, { mode } = {}) {
     finishedAt: null,
     resultSummary: null,
     lastError: null,
+    timedOut: false,
+    cancelledAt: null,
   });
 
   const result = await execute(task, dispatchMode);

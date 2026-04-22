@@ -17,17 +17,19 @@ The server listens on `PORT` (default `3000`).
 ## Endpoints
 - `GET /health` — liveness probe, returns `{ "status": "ok" }`. **Open** (never auth-gated).
 - `GET /info` — returns package metadata, Node.js version and process uptime. **Open** (never auth-gated).
-- `POST /tasks` — intake a new task; body: `{ "title": "string", "description": "string", "executionMode": "local|webhook|oz" }`. New tasks start in status `received`. **Protected** when `API_TOKEN` is set.
+- `POST /tasks` — intake a new task; body: `{ "title": "string", "description": "string", "executionMode": "local|webhook|oz", "priority": "low|normal|high", "timeoutMs": number, "maxRetries": number }`. New tasks start in status `received`. `priority`, `timeoutMs` and `maxRetries` are optional (see [Operational governance](#operational-governance)). **Protected** when `API_TOKEN` is set.
 - `GET /tasks` — list all tasks.
 - `GET /tasks/:id` — get a single task by id.
-- `PATCH /tasks/:id/status` — update task status; body: `{ "status": "pending|received|in_progress|done|failed|cancelled" }`.
+- `PATCH /tasks/:id/status` — update task status; body: `{ "status": "pending|received|in_progress|done|failed|cancelled" }`. Invalid transitions (e.g. `done` → anything, `failed` → `done`) return `409`.
 - `POST /tasks/:id/dispatch` — dispatch a task through the orchestrator; optional body: `{ "mode": "local|webhook|oz" }`. Moves the task to `in_progress` and records `runId`, `sessionLink`, `dispatchedAt`, `dispatchMode`, `runState`, `completedAt`, `finishedAt`, `resultSummary` and (on failure) `lastError`. Terminal state (`done`/`failed`/`cancelled`) is set when the underlying run completes (or when auto-sync catches up, see below).
+- `POST /tasks/:id/cancel` — locally mark a task `cancelled` and emit a terminal notification. Valid from `received`, `pending`, or `in_progress`; returns `409` if the task is already in a terminal state. **Local cancel only** — the remote Oz run is NOT aborted; see [Operational governance](#operational-governance).
+- `POST /tasks/:id/retry` — re-dispatch a task that is in `failed` status. Optional body: `{ "mode": "local|webhook|oz" }`. Increments `retryCount` and fires a fresh terminal notification when the new cycle completes. Returns `409` if the task is not `failed` or the retry budget has been exhausted.
 - `POST /tasks/:id/sync` — force a single sync of a task against its Oz run. Returns the updated task. `409` if the task has no `runId` or is not an `oz`-dispatched task; `404` if the id is unknown. Already-terminal tasks are returned as-is.
-- `POST /tasks/sync` — reconcile every in-progress Oz task in one pass. Returns `{ synced, results[] }`. Useful to manually advance pending tasks without waiting for the next auto-sync tick.
+- `POST /tasks/sync` — reconcile every in-progress Oz task in one pass, visiting higher-priority tasks first. Returns `{ synced, results[] }`. Useful to manually advance pending tasks without waiting for the next auto-sync tick.
 - `GET /notifications` — list every terminal-state notification event that has been emitted. Optional query param `taskId` filters by task. Returns `{ notifications, total }`. **Protected** when `API_TOKEN` is set.
 - `GET /tasks/:id/notifications` — list the terminal-state notification events emitted for a specific task. **Protected** when `API_TOKEN` is set.
 
-All `/tasks` and `/notifications` routes — including `POST /tasks`, `GET /tasks`, `GET /tasks/:id`, `PATCH /tasks/:id/status`, `POST /tasks/:id/dispatch`, `POST /tasks/:id/sync`, `POST /tasks/sync`, `GET /tasks/:id/notifications` and `GET /notifications` — are behind the same shared-secret check. See [API authentication](#api-authentication).
+All `/tasks` and `/notifications` routes — including `POST /tasks`, `GET /tasks`, `GET /tasks/:id`, `PATCH /tasks/:id/status`, `POST /tasks/:id/dispatch`, `POST /tasks/:id/cancel`, `POST /tasks/:id/retry`, `POST /tasks/:id/sync`, `POST /tasks/sync`, `GET /tasks/:id/notifications` and `GET /notifications` — are behind the same shared-secret check. See [API authentication](#api-authentication).
 ## API authentication
 The orchestration API supports a minimal shared-secret auth layer.
 - Set `API_TOKEN` to any non-empty string to require the token on every protected route.
@@ -85,6 +87,76 @@ export WARP_API_KEY=wk-...
 export OZ_ENVIRONMENT_ID=pLTnDripE1BVfLpDxBrKQJ   # optional
 npm start
 ```
+## Operational governance
+Tasks carry a small amount of operational metadata so callers can
+prioritize work, bound how long a task may run, and recover from
+transient failures without losing audit trail.
+### Priority
+- Field: `priority`. Allowed values: `low`, `normal`, `high`.
+- Default: `normal`.
+- Effect: `POST /tasks/sync` and the background auto-sync loop visit
+  higher-priority tasks before lower-priority ones; within the same
+  priority bucket, older tasks (`createdAt` ascending) go first.
+- Priority does NOT pre-empt an already-running task; it only
+  influences the order in which the next reconciliation pass picks
+  candidates.
+### Timeout
+- Field: `timeoutMs`. A positive integer number of milliseconds, or
+  `null` for no timeout.
+- Bounds: must be between `1000` ms and `86400000` ms (24 h) when
+  explicitly provided. Invalid values return `400`.
+- Default: read from `TASK_DEFAULT_TIMEOUT_MS` at task-creation time
+  (unset → no timeout).
+- Enforcement: on every sync call (manual or auto-sync), a task whose
+  `dispatchedAt + timeoutMs < now` is marked `failed` with
+  `timedOut: true` and `lastError = "task timed out after <ms>ms"`.
+  A terminal notification is emitted. The remote Oz run is NOT
+  aborted — only our local record transitions to terminal.
+### Retry
+- Field: `retryCount` (read-only, starts at `0`).
+- Field: `maxRetries`. Per-task override; if `null` or omitted, the
+  global default `MAX_TASK_RETRIES` is used (default `3`).
+- Retries are triggered explicitly via `POST /tasks/:id/retry`.
+  The endpoint:
+  - Requires the task to be in `failed` status (else `409`).
+  - Enforces the effective `maxRetries` budget (else `409`).
+  - Increments `retryCount`, clears `lastError` / `timedOut` /
+    `notifiedAt` / `notifiedStatus`, resets status to `received`, and
+    dispatches through the orchestrator.
+  - A fresh terminal notification is emitted when the new cycle
+    finishes.
+- There is no automatic retry and no exponential backoff; the caller
+  decides when to retry.
+### Cancel
+- `POST /tasks/:id/cancel` transitions a non-terminal task to
+  `cancelled`, stamps `cancelledAt` / `finishedAt`, and emits a
+  terminal notification.
+- Cancelling a task already in `done` / `failed` / `cancelled` returns
+  `409`.
+- **Local only.** If the task had already been dispatched to a remote
+  Oz run, that run is NOT aborted — the operator can follow
+  `sessionLink` to inspect / stop it in Warp. Future sync ticks will
+  simply skip the task because it is now terminal.
+### Status transitions
+Protected transitions are enforced by `PATCH /tasks/:id/status`:
+- `received` → `in_progress` / `cancelled` / `failed`
+- `in_progress` → `done` / `failed` / `cancelled`
+- `failed` → `received` / `in_progress` (retry path)
+- `done` and `cancelled` are permanently terminal
+Any other requested transition returns `409 { "error": "invalid transition: ..." }`.
+### Configuration
+- `TASK_DEFAULT_TIMEOUT_MS` — optional. Default timeout (ms) applied
+  to tasks created without an explicit `timeoutMs`. Clamped to the
+  `[1000, 86400000]` range.
+- `MAX_TASK_RETRIES` — optional. Default retry budget for tasks that
+  do not specify their own `maxRetries`. Non-negative integer;
+  defaults to `3`.
+### Limits
+- Cancellation and timeouts are local only; they do not abort a
+  remote Oz run.
+- No pre-emption: priority reorders pending work, it does not
+  interrupt running work.
+- No retry backoff or automatic retry — retries are always explicit.
 ## Automatic sync
 After dispatch, long-running Oz runs are driven to a terminal state
 automatically — there is no human in the loop.
@@ -199,6 +271,7 @@ src/
   dispatcher.js            # task orchestration (local + webhook + oz modes)
   syncService.js           # auto-sync loop + single-task/bulk sync helpers
   notificationService.js   # terminal-state notification emit + webhook delivery
+  governance.js            # priority / timeout / retry / transition helpers
   ozStateMap.js            # shared Warp Oz run-state -> task-status mapping
   ozClient.js              # thin Warp Oz REST API client (createRun/getRun)
   middleware/
@@ -216,6 +289,7 @@ test/
   autoSync.test.js         # integration test: dispatch + auto-sync vs mock Oz
   notifications.test.js    # integration test: terminal-state notifications
   auth.test.js             # integration test: API_TOKEN auth on protected routes
+  governance.test.js       # integration test: priority, cancel, retry, timeout, transitions
 data/
   tasks.json               # runtime task data (gitignored)
   notifications.json       # runtime notification audit trail (gitignored)

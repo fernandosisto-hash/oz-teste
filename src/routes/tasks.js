@@ -3,6 +3,8 @@ const taskStore = require('../store/taskStore');
 const dispatcher = require('../dispatcher');
 const syncService = require('../syncService');
 const notificationStore = require('../store/notificationStore');
+const notificationService = require('../notificationService');
+const governance = require('../governance');
 
 const router = express.Router();
 
@@ -27,7 +29,14 @@ const VALID_STATUSES = [
  * }
  */
 router.post('/', (req, res) => {
-  const { title, description, executionMode } = req.body || {};
+  const {
+    title,
+    description,
+    executionMode,
+    priority,
+    timeoutMs,
+    maxRetries,
+  } = req.body || {};
 
   if (!title || typeof title !== 'string' || !title.trim()) {
     return res.status(400).json({ error: 'title is required' });
@@ -39,10 +48,38 @@ router.post('/', (req, res) => {
     });
   }
 
+  const normalizedPriority = governance.normalizePriority(priority);
+  if (normalizedPriority === null) {
+    return res.status(400).json({
+      error: `priority must be one of: ${governance.VALID_PRIORITIES.join(', ')}`,
+    });
+  }
+
+  const timeoutCheck = governance.normalizeTimeoutMs(timeoutMs);
+  if (!timeoutCheck.ok) {
+    return res.status(400).json({ error: timeoutCheck.error });
+  }
+
+  if (
+    maxRetries !== undefined
+    && maxRetries !== null
+    && (!Number.isFinite(Number(maxRetries)) || Number(maxRetries) < 0)
+  ) {
+    return res.status(400).json({
+      error: 'maxRetries must be a non-negative integer',
+    });
+  }
+
   const task = taskStore.add({
     title: title.trim(),
     description: description ? String(description).trim() : null,
     executionMode,
+    priority: normalizedPriority,
+    timeoutMs: timeoutCheck.value,
+    maxRetries:
+      maxRetries === undefined || maxRetries === null
+        ? null
+        : Math.floor(Number(maxRetries)),
   });
   return res.status(201).json(task);
 });
@@ -92,8 +129,16 @@ router.patch('/:id/status', (req, res) => {
     });
   }
 
+  const existing = taskStore.getById(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'task not found' });
+
+  if (!governance.isValidTransition(existing.status, status)) {
+    return res.status(409).json({
+      error: `invalid transition: '${existing.status}' -> '${status}'`,
+    });
+  }
+
   const task = taskStore.updateStatus(req.params.id, status);
-  if (!task) return res.status(404).json({ error: 'task not found' });
   return res.json(task);
 });
 
@@ -163,6 +208,110 @@ router.post('/:id/dispatch', async (req, res, next) => {
   const { mode } = req.body || {};
   try {
     const updated = await dispatcher.dispatch(task, { mode });
+    return res.status(202).json(updated);
+  } catch (err) {
+    if (err.code === 'INVALID_MODE') {
+      return res.status(400).json({ error: err.message });
+    }
+    return next(err);
+  }
+});
+
+/**
+ * POST /tasks/:id/cancel
+ * Locally cancel a task. Valid from `received`, `pending`, or
+ * `in_progress`. Tasks already in a terminal state (`done`, `failed`,
+ * `cancelled`) are rejected with 409 so duplicate cancels surface
+ * clearly to the caller.
+ *
+ * Note: this is a LOCAL cancellation only. If the task was dispatched
+ * to a remote Oz run, the underlying run is NOT aborted — we just
+ * mark the task `cancelled` in our store, fire a terminal
+ * notification, and stop syncing it. The operator can follow
+ * `sessionLink` to inspect the remote run in Warp.
+ */
+router.post('/:id/cancel', async (req, res, next) => {
+  const task = taskStore.getById(req.params.id);
+  if (!task) return res.status(404).json({ error: 'task not found' });
+
+  if (governance.isTerminalStatus(task.status)) {
+    return res.status(409).json({
+      error: `task in status '${task.status}' cannot be cancelled`,
+    });
+  }
+
+  const now = new Date().toISOString();
+  const updated = taskStore.updateExecution(task.id, {
+    status: 'cancelled',
+    cancelledAt: now,
+    completedAt: task.completedAt || now,
+    finishedAt: now,
+  });
+
+  try {
+    await notificationService.notifyIfTerminal(updated);
+  } catch (err) {
+    return next(err);
+  }
+
+  const finalTask = taskStore.getById(task.id) || updated;
+  return res.status(200).json(finalTask);
+});
+
+/**
+ * POST /tasks/:id/retry
+ * Re-dispatch a previously-failed task. Only valid from the `failed`
+ * status. Enforces a per-task retry budget: the effective limit is
+ * the task's own `maxRetries` if set, otherwise the global default
+ * `MAX_TASK_RETRIES` (default 3).
+ *
+ * Body (optional): { mode?: 'local' | 'webhook' | 'oz' }
+ * If omitted, the task's own executionMode is used.
+ *
+ * Increments `retryCount` before dispatching and clears the
+ * previous-cycle notification stamp so a new terminal notification is
+ * emitted when the retry completes.
+ */
+router.post('/:id/retry', async (req, res, next) => {
+  const task = taskStore.getById(req.params.id);
+  if (!task) return res.status(404).json({ error: 'task not found' });
+
+  if (task.status !== 'failed') {
+    return res.status(409).json({
+      error: `task in status '${task.status}' cannot be retried (must be 'failed')`,
+    });
+  }
+
+  const limit = Number.isFinite(task.maxRetries) && task.maxRetries !== null
+    ? task.maxRetries
+    : governance.defaultMaxRetries();
+  const used = Number.isFinite(task.retryCount) ? task.retryCount : 0;
+  if (used >= limit) {
+    return res.status(409).json({
+      error: `retry budget exhausted (${used}/${limit})`,
+      retryCount: used,
+      maxRetries: limit,
+    });
+  }
+
+  // Reset per-cycle state so a fresh lifecycle can run. The
+  // notification stamp is cleared so the next terminal state fires
+  // a new event; `lastError` and `timedOut` are cleared to avoid
+  // stale metadata bleeding through.
+  const reset = taskStore.updateExecution(task.id, {
+    status: 'received',
+    retryCount: used + 1,
+    lastError: null,
+    timedOut: false,
+    notifiedAt: null,
+    notifiedStatus: null,
+    completedAt: null,
+    finishedAt: null,
+  });
+
+  const { mode } = req.body || {};
+  try {
+    const updated = await dispatcher.dispatch(reset, { mode });
     return res.status(202).json(updated);
   } catch (err) {
     if (err.code === 'INVALID_MODE') {

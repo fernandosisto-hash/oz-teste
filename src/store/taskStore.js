@@ -79,7 +79,14 @@ function getById(id) {
   return tasks.find((t) => t.id === Number(id));
 }
 
-function add({ title, description, executionMode }) {
+function add({
+  title,
+  description,
+  executionMode,
+  priority,
+  timeoutMs,
+  maxRetries,
+}) {
   load();
   const task = {
     id: nextId++,
@@ -87,6 +94,10 @@ function add({ title, description, executionMode }) {
     description: description || null,
     executionMode: executionMode || 'local',
     status: 'received',
+    priority: priority || 'normal',
+    timeoutMs: timeoutMs == null ? null : Number(timeoutMs),
+    retryCount: 0,
+    maxRetries: Number.isFinite(maxRetries) ? Number(maxRetries) : null,
     createdAt: new Date().toISOString(),
   };
   tasks.push(task);

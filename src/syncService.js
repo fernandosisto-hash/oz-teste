@@ -2,6 +2,7 @@ const taskStore = require('./store/taskStore');
 const ozClient = require('./ozClient');
 const { mapOzState } = require('./ozStateMap');
 const notificationService = require('./notificationService');
+const governance = require('./governance');
 
 /**
  * Task auto-sync service.
@@ -71,6 +72,24 @@ async function syncTask(taskOrId) {
     return { ok: true, alreadyTerminal: true, terminal: true, task };
   }
 
+  // Enforce per-task timeout before touching the Oz API. A timed-out
+  // task is locally marked `failed` and a terminal notification is
+  // fired. We do not attempt to cancel the remote Oz run here — see
+  // README for the limits of local cancellation semantics.
+  if (governance.hasTimedOut(task)) {
+    const now = new Date().toISOString();
+    const updated = taskStore.updateExecution(task.id, {
+      status: 'failed',
+      timedOut: true,
+      lastError: `task timed out after ${task.timeoutMs}ms`,
+      completedAt: task.completedAt || now,
+      finishedAt: now,
+    });
+    await notificationService.notifyIfTerminal(updated);
+    const finalTask = taskStore.getById(task.id) || updated;
+    return { ok: true, terminal: true, timedOut: true, task: finalTask };
+  }
+
   if (!task.runId) {
     return { ok: false, error: 'task has no runId to sync', task };
   }
@@ -138,7 +157,10 @@ async function syncTask(taskOrId) {
  * results in the same shape as `syncTask`.
  */
 async function syncInProgressTasks() {
-  const candidates = taskStore.getAll().filter(isSyncable);
+  const candidates = taskStore
+    .getAll()
+    .filter((t) => isSyncable(t) || governance.hasTimedOut(t))
+    .sort(governance.comparePriority);
   const results = [];
   for (const task of candidates) {
     // Serial on purpose: avoids hammering the Oz API and keeps
