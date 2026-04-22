@@ -1,43 +1,80 @@
 const crypto = require('crypto');
 const taskStore = require('./store/taskStore');
+const ozClient = require('./ozClient');
 
 /**
- * Minimal first-pass task dispatcher.
+ * Task dispatcher.
  *
- * Given a persisted task, this module walks it through the execution
- * lifecycle and records metadata on the task record so the outcome is
- * visible via the API:
+ * Walks a persisted task through the execution lifecycle and records
+ * execution metadata on the task record so the outcome is visible via
+ * the API:
  *
- *   status:      received -> in_progress -> done | failed
- *   metadata:    runId, dispatchedAt, dispatchMode, completedAt, lastError
+ *   status:   received -> in_progress -> done | failed | cancelled
+ *   fields:   runId, sessionLink, dispatchedAt, dispatchMode, runState,
+ *             completedAt, lastError
  *
- * Two dispatch modes are supported:
+ * Supported dispatch modes:
  *
- *   - "local":   synchronous no-op execution. The task is immediately
- *                marked as done. This is the default and requires no
- *                external configuration.
- *   - "webhook": POSTs the task payload to DISPATCH_WEBHOOK_URL (env).
- *                A 2xx response marks the task as done; anything else
- *                (including network errors) marks it as failed and
- *                stores the error message in lastError.
+ *   - "oz":      Creates a real Warp Oz cloud agent run via the REST
+ *                API. This is the default when WARP_API_KEY is set. The
+ *                task is marked `in_progress` as soon as the run is
+ *                accepted; we then briefly poll the Oz run and transition
+ *                to a terminal status if it finishes quickly. Long-running
+ *                runs remain `in_progress` with `runId` + `sessionLink`
+ *                stored so an operator can follow the run in Warp.
+ *   - "local":   Deterministic no-op execution, immediately marked
+ *                `done`. Kept as a zero-config fallback / dev mode.
+ *   - "webhook": POSTs the task payload to DISPATCH_WEBHOOK_URL. A 2xx
+ *                response marks the task `done`; any other response or
+ *                network error marks it `failed` and stores the reason
+ *                in `lastError`.
  *
  * Dispatch is awaited by the caller so the HTTP response reflects the
- * final state. This is intentional for a first-pass dispatcher — we do
- * not yet need background workers or queues.
+ * latest persisted state. No background worker/queue yet.
  */
 
-const VALID_MODES = ['local', 'webhook'];
+const VALID_MODES = ['local', 'webhook', 'oz'];
+
+// Warp Oz run states mapped onto our task statuses. The Warp API uses
+// upper-case identifiers; we compare case-insensitively to be safe.
+const OZ_STATE_MAP = {
+  INPROGRESS: 'in_progress',
+  IN_PROGRESS: 'in_progress',
+  RUNNING: 'in_progress',
+  STARTING: 'in_progress',
+  QUEUED: 'in_progress',
+  PENDING: 'in_progress',
+  SUCCEEDED: 'done',
+  COMPLETED: 'done',
+  DONE: 'done',
+  FAILED: 'failed',
+  ERRORED: 'failed',
+  CANCELLED: 'cancelled',
+  CANCELED: 'cancelled',
+};
+
+function mapOzState(runState) {
+  if (!runState) return 'in_progress';
+  return OZ_STATE_MAP[String(runState).toUpperCase()] || 'in_progress';
+}
 
 function newRunId() {
-  // crypto.randomUUID is available on Node >= 14.17 / 16.
   return crypto.randomUUID();
 }
 
+function defaultMode(task) {
+  if (task && task.executionMode) return task.executionMode;
+  return ozClient.isConfigured() ? 'oz' : 'local';
+}
+
 async function runLocal(task) {
-  // Local mode is a deterministic no-op "execution". Kept as its own
-  // function so later we can plug in real work (spawning a process,
-  // invoking a handler registry, etc.) without touching callers.
-  return { ok: true, detail: `local execution of task ${task.id}` };
+  return {
+    ok: true,
+    terminal: true,
+    status: 'done',
+    runId: newRunId(),
+    detail: `local execution of task ${task.id}`,
+  };
 }
 
 async function runWebhook(task) {
@@ -45,6 +82,9 @@ async function runWebhook(task) {
   if (!url) {
     return {
       ok: false,
+      terminal: true,
+      status: 'failed',
+      runId: newRunId(),
       error: 'DISPATCH_WEBHOOK_URL is not configured',
     };
   }
@@ -56,16 +96,117 @@ async function runWebhook(task) {
       body: JSON.stringify({ task }),
     });
     if (!res.ok) {
-      return { ok: false, error: `webhook responded with HTTP ${res.status}` };
+      return {
+        ok: false,
+        terminal: true,
+        status: 'failed',
+        runId: newRunId(),
+        error: `webhook responded with HTTP ${res.status}`,
+      };
     }
-    return { ok: true, detail: `webhook accepted task ${task.id}` };
+    return {
+      ok: true,
+      terminal: true,
+      status: 'done',
+      runId: newRunId(),
+      detail: `webhook accepted task ${task.id}`,
+    };
   } catch (err) {
-    return { ok: false, error: `webhook request failed: ${err.message}` };
+    return {
+      ok: false,
+      terminal: true,
+      status: 'failed',
+      runId: newRunId(),
+      error: `webhook request failed: ${err.message}`,
+    };
   }
+}
+
+function buildOzPrompt(task) {
+  const parts = [];
+  if (task.title) parts.push(task.title.trim());
+  if (task.description) parts.push(String(task.description).trim());
+  return parts.join('\n\n') || `Task #${task.id}`;
+}
+
+/**
+ * Dispatch a task to a real Oz cloud agent run.
+ *
+ * Returns an execution result object with metadata to persist. The
+ * return contract (`terminal`/`status`/...) mirrors the other modes so
+ * the main dispatch() function can treat them uniformly.
+ */
+async function runOz(task) {
+  let created;
+  try {
+    created = await ozClient.createRun({
+      prompt: buildOzPrompt(task),
+      name: `task-${task.id}`,
+    });
+  } catch (err) {
+    return {
+      ok: false,
+      terminal: true,
+      status: 'failed',
+      runId: null,
+      sessionLink: null,
+      runState: null,
+      error: `oz createRun failed: ${err.message}`,
+    };
+  }
+
+  // Persist what we have now so the API caller sees in_progress with
+  // runId + sessionLink even if we fail to poll later.
+  taskStore.updateExecution(task.id, {
+    runId: created.runId,
+    sessionLink: created.sessionLink,
+    runState: created.runState,
+  });
+
+  // Best-effort brief poll to catch quick completions. We intentionally
+  // cap this tight so the HTTP dispatch call returns fast; anything
+  // longer than this just stays in_progress and can be inspected via
+  // GET /tasks/:id or the session link.
+  const POLL_MAX_ATTEMPTS = 3;
+  const POLL_INTERVAL_MS = 1500;
+  let latest = created;
+
+  for (let i = 0; i < POLL_MAX_ATTEMPTS; i += 1) {
+    const mapped = mapOzState(latest.runState);
+    if (mapped !== 'in_progress') break;
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+    try {
+      latest = await ozClient.getRun(created.runId);
+    } catch (err) {
+      // Non-fatal: keep what we had and surface via lastError.
+      return {
+        ok: true,
+        terminal: false,
+        status: 'in_progress',
+        runId: created.runId,
+        sessionLink: created.sessionLink,
+        runState: created.runState,
+        pollError: `oz getRun failed: ${err.message}`,
+      };
+    }
+  }
+
+  const finalStatus = mapOzState(latest.runState);
+  const isTerminal = finalStatus !== 'in_progress';
+  return {
+    ok: finalStatus !== 'failed',
+    terminal: isTerminal,
+    status: finalStatus,
+    runId: latest.runId || created.runId,
+    sessionLink: latest.sessionLink || created.sessionLink,
+    runState: latest.runState || created.runState,
+    error: finalStatus === 'failed' ? `oz run reported state ${latest.runState}` : null,
+  };
 }
 
 async function execute(task, mode) {
   if (mode === 'webhook') return runWebhook(task);
+  if (mode === 'oz') return runOz(task);
   return runLocal(task);
 }
 
@@ -77,7 +218,7 @@ async function execute(task, mode) {
  * failures are reflected on the task via status='failed' and lastError.
  */
 async function dispatch(task, { mode } = {}) {
-  const dispatchMode = mode || task.executionMode || 'local';
+  const dispatchMode = mode || defaultMode(task);
   if (!VALID_MODES.includes(dispatchMode)) {
     const err = new Error(
       `invalid dispatch mode '${dispatchMode}', expected one of: ${VALID_MODES.join(', ')}`,
@@ -86,36 +227,41 @@ async function dispatch(task, { mode } = {}) {
     throw err;
   }
 
-  const runId = newRunId();
   const dispatchedAt = new Date().toISOString();
 
-  // Transition: received -> in_progress, stamping run metadata.
+  // Transition: received -> in_progress, stamping initial metadata.
+  // For 'oz' the real runId/sessionLink/runState are filled in by runOz
+  // after the API call succeeds.
   taskStore.updateExecution(task.id, {
     status: 'in_progress',
-    runId,
     dispatchedAt,
     dispatchMode,
+    runId: null,
+    sessionLink: null,
+    runState: null,
+    completedAt: null,
     lastError: null,
   });
 
   const result = await execute(task, dispatchMode);
-  const completedAt = new Date().toISOString();
+  const completedAt = result.terminal ? new Date().toISOString() : null;
 
-  if (result.ok) {
-    return taskStore.updateExecution(task.id, {
-      status: 'done',
-      completedAt,
-    });
-  }
-
-  return taskStore.updateExecution(task.id, {
-    status: 'failed',
+  const patch = {
+    status: result.status,
+    runId: result.runId || null,
+    sessionLink: result.sessionLink || null,
+    runState: result.runState || null,
     completedAt,
-    lastError: result.error || 'unknown dispatch failure',
-  });
+    lastError: result.error || result.pollError || null,
+  };
+
+  return taskStore.updateExecution(task.id, patch);
 }
 
 module.exports = {
   dispatch,
   VALID_MODES,
+  // exported for testability
+  _mapOzState: mapOzState,
+  _defaultMode: defaultMode,
 };
