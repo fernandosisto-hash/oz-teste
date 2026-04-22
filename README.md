@@ -15,17 +15,44 @@ npm run lint  # run linter
 ```
 The server listens on `PORT` (default `3000`).
 ## Endpoints
-- `GET /health` — liveness probe, returns `{ "status": "ok" }`.
-- `GET /info` — returns package metadata, Node.js version and process uptime.
-- `POST /tasks` — intake a new task; body: `{ "title": "string", "description": "string", "executionMode": "local|webhook|oz" }`. New tasks start in status `received`.
+- `GET /health` — liveness probe, returns `{ "status": "ok" }`. **Open** (never auth-gated).
+- `GET /info` — returns package metadata, Node.js version and process uptime. **Open** (never auth-gated).
+- `POST /tasks` — intake a new task; body: `{ "title": "string", "description": "string", "executionMode": "local|webhook|oz" }`. New tasks start in status `received`. **Protected** when `API_TOKEN` is set.
 - `GET /tasks` — list all tasks.
 - `GET /tasks/:id` — get a single task by id.
 - `PATCH /tasks/:id/status` — update task status; body: `{ "status": "pending|received|in_progress|done|failed|cancelled" }`.
 - `POST /tasks/:id/dispatch` — dispatch a task through the orchestrator; optional body: `{ "mode": "local|webhook|oz" }`. Moves the task to `in_progress` and records `runId`, `sessionLink`, `dispatchedAt`, `dispatchMode`, `runState`, `completedAt`, `finishedAt`, `resultSummary` and (on failure) `lastError`. Terminal state (`done`/`failed`/`cancelled`) is set when the underlying run completes (or when auto-sync catches up, see below).
 - `POST /tasks/:id/sync` — force a single sync of a task against its Oz run. Returns the updated task. `409` if the task has no `runId` or is not an `oz`-dispatched task; `404` if the id is unknown. Already-terminal tasks are returned as-is.
 - `POST /tasks/sync` — reconcile every in-progress Oz task in one pass. Returns `{ synced, results[] }`. Useful to manually advance pending tasks without waiting for the next auto-sync tick.
-- `GET /notifications` — list every terminal-state notification event that has been emitted. Optional query param `taskId` filters by task. Returns `{ notifications, total }`.
-- `GET /tasks/:id/notifications` — list the terminal-state notification events emitted for a specific task.
+- `GET /notifications` — list every terminal-state notification event that has been emitted. Optional query param `taskId` filters by task. Returns `{ notifications, total }`. **Protected** when `API_TOKEN` is set.
+- `GET /tasks/:id/notifications` — list the terminal-state notification events emitted for a specific task. **Protected** when `API_TOKEN` is set.
+
+All `/tasks` and `/notifications` routes — including `POST /tasks`, `GET /tasks`, `GET /tasks/:id`, `PATCH /tasks/:id/status`, `POST /tasks/:id/dispatch`, `POST /tasks/:id/sync`, `POST /tasks/sync`, `GET /tasks/:id/notifications` and `GET /notifications` — are behind the same shared-secret check. See [API authentication](#api-authentication).
+## API authentication
+The orchestration API supports a minimal shared-secret auth layer.
+- Set `API_TOKEN` to any non-empty string to require the token on every protected route.
+- Callers send the token via either header:
+  - `Authorization: Bearer <token>`
+  - `X-API-Token: <token>`
+- Missing credentials return `401 { "error": "authentication required" }`.
+- Wrong credentials return `403 { "error": "invalid token" }`.
+- `GET /health` and `GET /info` are always open so liveness probes and basic introspection keep working without a token.
+- If `API_TOKEN` is **unset**, the middleware logs a one-time startup warning and lets every request through. This is intentional for zero-config local development; set `API_TOKEN` in any non-dev environment.
+Example:
+```bash
+export API_TOKEN=$(openssl rand -hex 32)
+npm start
+# in another shell:
+curl -s http://localhost:3000/health                       # 200 (open)
+curl -s http://localhost:3000/tasks                        # 401
+curl -s -H "Authorization: Bearer $API_TOKEN" \
+  http://localhost:3000/tasks                              # 200
+curl -s -X POST -H "Authorization: Bearer $API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"title":"hello","executionMode":"local"}' \
+  http://localhost:3000/tasks                              # 201
+```
+Token comparison uses `crypto.timingSafeEqual` to avoid trivial timing side-channels. Never hardcode the token — always provide it via the environment.
 ## Dispatch
 Dispatch modes:
 - `oz` (default when `WARP_API_KEY` is set): creates a **real Warp Oz
@@ -94,7 +121,7 @@ quiets down once everything has resolved.
 - No queue/worker pool; the loop is sequential on purpose.
 - Non-`oz` dispatch modes (`local`, `webhook`) are driven to terminal
   synchronously during dispatch and are never touched by auto-sync.
-- No auth on the API, no database, no Docker/CI/deploy config.
+- Optional shared-secret auth via `API_TOKEN`; no full user system, database, OAuth, JWT infrastructure, or Docker/CI/deploy config.
 - Re-dispatching a task that is already `in_progress` is rejected; set
   the task to `failed` via `PATCH /tasks/:id/status` if you need to
   retry an Oz run.
@@ -174,18 +201,21 @@ src/
   notificationService.js   # terminal-state notification emit + webhook delivery
   ozStateMap.js            # shared Warp Oz run-state -> task-status mapping
   ozClient.js              # thin Warp Oz REST API client (createRun/getRun)
+  middleware/
+    auth.js                # API_TOKEN shared-secret auth middleware
   routes/
-    index.js               # mounts all feature routers
-    health.js              # GET /health
-    info.js                # GET /info
-    tasks.js               # tasks endpoints incl. dispatch + sync
-    notifications.js       # GET /notifications
+    index.js               # mounts all feature routers (auth on /tasks + /notifications)
+    health.js              # GET /health (open)
+    info.js                # GET /info (open)
+    tasks.js               # tasks endpoints incl. dispatch + sync (protected)
+    notifications.js       # GET /notifications (protected)
   store/
     taskStore.js           # file-backed JSON persistence for tasks
     notificationStore.js   # file-backed JSON persistence for notification events
 test/
   autoSync.test.js         # integration test: dispatch + auto-sync vs mock Oz
   notifications.test.js    # integration test: terminal-state notifications
+  auth.test.js             # integration test: API_TOKEN auth on protected routes
 data/
   tasks.json               # runtime task data (gitignored)
   notifications.json       # runtime notification audit trail (gitignored)
