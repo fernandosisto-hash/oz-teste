@@ -5,7 +5,9 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "nodemon src/index.js"
+    "dev": "nodemon src/index.js",
+    "test": "echo \"No tests yet\" && exit 0",
+    "lint": "echo \"No linter configured yet\" && exit 0"
   },
   "dependencies": {
     "express": "^4.18.2"

@@ -1,12 +1,11 @@
 const express = require('express');
+const routes = require('./routes');
 
 const app = express();
 
 app.use(express.json());
 
-// Health check
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok' });
-});
+// Mount API routes
+app.use('/', routes);
 
 module.exports = app;
