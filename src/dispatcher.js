@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const taskStore = require('./store/taskStore');
 const ozClient = require('./ozClient');
+const { mapOzState } = require('./ozStateMap');
 
 /**
  * Task dispatcher.
@@ -11,7 +12,11 @@ const ozClient = require('./ozClient');
  *
  *   status:   received -> in_progress -> done | failed | cancelled
  *   fields:   runId, sessionLink, dispatchedAt, dispatchMode, runState,
- *             completedAt, lastError
+ *             completedAt, finishedAt, resultSummary, lastError
+ *
+ * Long-running Oz runs are carried to their terminal state by the
+ * separate auto-sync service (see src/syncService.js); dispatch no
+ * longer has to poll to completion.
  *
  * Supported dispatch modes:
  *
@@ -34,29 +39,6 @@ const ozClient = require('./ozClient');
  */
 
 const VALID_MODES = ['local', 'webhook', 'oz'];
-
-// Warp Oz run states mapped onto our task statuses. The Warp API uses
-// upper-case identifiers; we compare case-insensitively to be safe.
-const OZ_STATE_MAP = {
-  INPROGRESS: 'in_progress',
-  IN_PROGRESS: 'in_progress',
-  RUNNING: 'in_progress',
-  STARTING: 'in_progress',
-  QUEUED: 'in_progress',
-  PENDING: 'in_progress',
-  SUCCEEDED: 'done',
-  COMPLETED: 'done',
-  DONE: 'done',
-  FAILED: 'failed',
-  ERRORED: 'failed',
-  CANCELLED: 'cancelled',
-  CANCELED: 'cancelled',
-};
-
-function mapOzState(runState) {
-  if (!runState) return 'in_progress';
-  return OZ_STATE_MAP[String(runState).toUpperCase()] || 'in_progress';
-}
 
 function newRunId() {
   return crypto.randomUUID();
@@ -240,6 +222,8 @@ async function dispatch(task, { mode } = {}) {
     sessionLink: null,
     runState: null,
     completedAt: null,
+    finishedAt: null,
+    resultSummary: null,
     lastError: null,
   });
 
@@ -252,6 +236,7 @@ async function dispatch(task, { mode } = {}) {
     sessionLink: result.sessionLink || null,
     runState: result.runState || null,
     completedAt,
+    finishedAt: completedAt,
     lastError: result.error || result.pollError || null,
   };
 

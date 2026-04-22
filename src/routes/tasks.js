@@ -1,6 +1,7 @@
 const express = require('express');
 const taskStore = require('../store/taskStore');
 const dispatcher = require('../dispatcher');
+const syncService = require('../syncService');
 
 const router = express.Router();
 
@@ -95,6 +96,45 @@ router.patch('/:id/status', (req, res) => {
  * Tasks already in a terminal or active state cannot be re-dispatched
  * without first resetting their status.
  */
+/**
+ * POST /tasks/sync
+ * Reconcile every in-progress Oz-backed task in one pass. Useful to
+ * manually kick the loop without waiting for the next auto-sync tick.
+ * Returns per-task sync results.
+ */
+router.post('/sync', async (req, res, next) => {
+  try {
+    const results = await syncService.syncInProgressTasks();
+    return res.json({ synced: results.length, results });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+/**
+ * POST /tasks/:id/sync
+ * Sync a single task against its Oz run and return the updated task.
+ * No-op (with 200) if the task is already in a terminal state. Returns
+ * 409 for tasks that cannot be synced (missing runId or non-oz mode).
+ */
+router.post('/:id/sync', async (req, res, next) => {
+  const task = taskStore.getById(req.params.id);
+  if (!task) return res.status(404).json({ error: 'task not found' });
+
+  try {
+    const result = await syncService.syncTask(task);
+    if (!result.ok) {
+      return res.status(409).json({
+        error: result.error,
+        task: result.task || task,
+      });
+    }
+    return res.json(result.task);
+  } catch (err) {
+    return next(err);
+  }
+});
+
 router.post('/:id/dispatch', async (req, res, next) => {
   const task = taskStore.getById(req.params.id);
   if (!task) return res.status(404).json({ error: 'task not found' });

@@ -21,7 +21,9 @@ The server listens on `PORT` (default `3000`).
 - `GET /tasks` — list all tasks.
 - `GET /tasks/:id` — get a single task by id.
 - `PATCH /tasks/:id/status` — update task status; body: `{ "status": "pending|received|in_progress|done|failed|cancelled" }`.
-- `POST /tasks/:id/dispatch` — dispatch a task through the orchestrator; optional body: `{ "mode": "local|webhook|oz" }`. Moves the task to `in_progress` and records `runId`, `sessionLink`, `dispatchedAt`, `dispatchMode`, `runState`, `completedAt` and (on failure) `lastError`. Terminal state (`done`/`failed`/`cancelled`) is set when the underlying run completes.
+- `POST /tasks/:id/dispatch` — dispatch a task through the orchestrator; optional body: `{ "mode": "local|webhook|oz" }`. Moves the task to `in_progress` and records `runId`, `sessionLink`, `dispatchedAt`, `dispatchMode`, `runState`, `completedAt`, `finishedAt`, `resultSummary` and (on failure) `lastError`. Terminal state (`done`/`failed`/`cancelled`) is set when the underlying run completes (or when auto-sync catches up, see below).
+- `POST /tasks/:id/sync` — force a single sync of a task against its Oz run. Returns the updated task. `409` if the task has no `runId` or is not an `oz`-dispatched task; `404` if the id is unknown. Already-terminal tasks are returned as-is.
+- `POST /tasks/sync` — reconcile every in-progress Oz task in one pass. Returns `{ synced, results[] }`. Useful to manually advance pending tasks without waiting for the next auto-sync tick.
 ## Dispatch
 Dispatch modes:
 - `oz` (default when `WARP_API_KEY` is set): creates a **real Warp Oz
@@ -54,13 +56,42 @@ export WARP_API_KEY=wk-...
 export OZ_ENVIRONMENT_ID=pLTnDripE1BVfLpDxBrKQJ   # optional
 npm start
 ```
+## Automatic sync
+After dispatch, long-running Oz runs are driven to a terminal state
+automatically — there is no human in the loop.
+A small in-process timer (`src/syncService.js`) wakes up every
+`AUTO_SYNC_INTERVAL_MS` milliseconds (default `5000`), finds every
+task that is `in_progress` (or `pending`) with a `runId` and a
+`dispatchMode` of `oz`, calls `GET /api/v1/agent/runs/:runId` against
+the Warp API, and persists the result on the task:
+- `runState` (raw Warp state string)
+- `status` (mapped to `in_progress` / `done` / `failed` / `cancelled`)
+- `sessionLink` (kept fresh from the API)
+- `resultSummary` (best-effort, from `result_summary` / `summary` /
+  `result` fields if present in the payload)
+- `completedAt` and `finishedAt` (set the first time the task reaches
+  a terminal state)
+- `lastError` (set on `failed` or on a transient Oz API error; cleared
+  on successful completion)
+Terminal tasks are skipped on subsequent ticks, so the loop naturally
+quiets down once everything has resolved.
+### Controls
+- `AUTO_SYNC_INTERVAL_MS` — override the tick interval in milliseconds
+  (minimum 500, default 5000).
+- `AUTO_SYNC_DISABLED=true` — do not start the loop at all. Useful in
+  tests or when driving sync manually via the HTTP endpoints.
+### Manual triggers
+- `POST /tasks/:id/sync` — sync a single task immediately.
+- `POST /tasks/sync` — reconcile every active Oz task in one pass.
 ### Current limitations
-- The dispatcher only polls the Oz run briefly inside the HTTP call.
-  Long-running runs are left as `in_progress`; there is no background
-  reconciliation yet. Use `GET /tasks/:id` or the stored `sessionLink`
-  to check final state in Warp.
-- No queue/worker: dispatch is synchronous from the caller's point of
-  view and one task is dispatched per HTTP request.
+- Auto-sync runs only in-process, in the same Node.js server that
+  receives the dispatch. Restarting the server resumes the loop from
+  persisted state (so in-progress tasks are picked back up on next
+  tick), but there is no cross-process coordination: running two
+  servers against the same `tasks.json` would duplicate sync calls.
+- No queue/worker pool; the loop is sequential on purpose.
+- Non-`oz` dispatch modes (`local`, `webhook`) are driven to terminal
+  synchronously during dispatch and are never touched by auto-sync.
 - No auth on the API, no database, no Docker/CI/deploy config.
 - Re-dispatching a task that is already `in_progress` is rejected; set
   the task to `failed` via `PATCH /tasks/:id/status` if you need to
@@ -77,17 +108,21 @@ No database is used; the file is rewritten on every mutation.
 ## Project layout
 ```
 src/
-  index.js           # entry point, starts the HTTP server
+  index.js           # entry point, starts the HTTP server + auto-sync loop
   app.js             # Express app configuration
   dispatcher.js      # task orchestration (local + webhook + oz modes)
+  syncService.js     # auto-sync loop + single-task/bulk sync helpers
+  ozStateMap.js      # shared Warp Oz run-state -> task-status mapping
   ozClient.js        # thin Warp Oz REST API client (createRun/getRun)
   routes/
     index.js         # mounts all feature routers
     health.js        # GET /health
     info.js          # GET /info
-    tasks.js         # tasks endpoints incl. POST /tasks/:id/dispatch
+    tasks.js         # tasks endpoints incl. dispatch + sync
   store/
     taskStore.js     # file-backed JSON persistence for tasks
+test/
+  autoSync.test.js   # integration test: dispatch + auto-sync vs mock Oz
 data/
   tasks.json         # runtime task data (gitignored)
 ```
