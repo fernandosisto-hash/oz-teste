@@ -2,10 +2,12 @@ const express = require('express');
 
 const healthRouter = require('./health');
 const infoRouter = require('./info');
+const tasksRouter = require('./tasks');
 
 const router = express.Router();
 
 router.use('/health', healthRouter);
 router.use('/info', infoRouter);
+router.use('/tasks', tasksRouter);
 
 module.exports = router;
