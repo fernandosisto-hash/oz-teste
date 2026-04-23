@@ -11,6 +11,7 @@ first non-trivial run.
 ## Run
 ```bash
 npm start     # start the server
+npm run start:prod   # start with .env.production loaded by Node
 npm run dev   # start with nodemon reload
 npm test      # run tests
 npm run lint  # run linter
@@ -251,6 +252,35 @@ Recognised variables (beyond the ones already listed above):
 - `TRUST_PROXY` — when set, passed to `app.set('trust proxy', ...)` so
   `X-Forwarded-For` / `X-Forwarded-Proto` are honoured behind a
   reverse proxy. Leave unset locally.
+
+## Production preset / deploy
+Repository includes a simple production path:
+
+- `.env.production.example` — secure-ish baseline for first production boot
+- `Dockerfile` — minimal Node 22 image
+- `docker-compose.production.yml` — single-service deploy with persisted `./data`
+
+Suggested flow:
+
+```bash
+cp .env.production.example .env.production
+# edit API_TOKEN and whichever dispatch backend you actually want
+npm run start:prod
+```
+
+Or with Docker Compose:
+
+```bash
+cp .env.production.example .env.production
+docker compose -f docker-compose.production.yml up -d --build
+curl -s http://localhost:3000/health
+```
+
+Important production notes:
+- `NODE_ENV=production` already forces `API_TOKEN` at boot.
+- Default production preset uses `DEFAULT_EXECUTION_MODE=miguel`.
+- Default production preset sets `MIGUEL_LOCAL_FALLBACK=false`, so the app fails closed for dispatch selection instead of silently dropping to local execution.
+- Switch to Postgres by setting `STORAGE_BACKEND=postgres` and `DATABASE_URL=...` in `.env.production`.
 ## Errors
 Unhandled errors and 404s go through a global handler
 (`src/middleware/errorHandler.js`) that returns a stable shape:

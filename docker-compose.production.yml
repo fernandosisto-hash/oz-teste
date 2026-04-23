@@ -1,0 +1,11 @@
+services:
+  oz-teste:
+    build: .
+    container_name: oz-teste
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/app/data
