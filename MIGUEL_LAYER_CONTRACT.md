@@ -146,3 +146,30 @@ O próximo passo acima deste contrato é uma camada de negócio que faça:
 - classificação/priorização automática
 - política de retry/escalation por tipo de trabalho
 - feedback ao operador humano
+
+## 11. Exemplos operacionais rápidos
+
+### Criar task em modo miguel
+
+```bash
+curl -s -X POST http://localhost:3000/tasks \
+  -H "Authorization: Bearer $API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"title":"rodar rotina","executionMode":"miguel","priority":"high"}'
+```
+
+### Ler a decisão tomada
+
+Campos para olhar na task:
+- `dispatchMode`
+- `dispatchMeta.resolvedMode`
+- `dispatchMeta.fallbackUsed`
+- `dispatchMeta.reason`
+- `dispatchMeta.availability`
+
+### Interpretar rápido
+
+- `resolvedMode=oz` → foi para Warp/Oz
+- `resolvedMode=webhook` → caiu no integrador HTTP
+- `resolvedMode=local` → executou no fallback local
+- `resolvedMode=null` → falhou fechado por falta de target disponível

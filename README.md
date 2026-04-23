@@ -4,6 +4,8 @@ Node.js + Express API skeleton with a first-pass Warp Oz task dispatcher.
 Arquivos de apoio desta fase:
 - `RUNBOOK.md` — subida, operação e checklist
 - `MIGUEL_LAYER_CONTRACT.md` — contrato da camada MiguelAntônio/orquestração
+- `API_EXAMPLES.md` — exemplos prontos de chamadas
+- `CUTOVER_CHECKLIST.md` — sequência exata da virada
 ## Requirements
 - Node.js >= 18
 ## Install
@@ -273,6 +275,7 @@ Suggested flow:
 cp .env.production.example .env.production
 # edit API_TOKEN and whichever dispatch backend you actually want
 npm run start:prod
+API_TOKEN=... BASE_URL=http://localhost:3000 TASK_MODE=local ./scripts/smoke.sh
 ```
 
 Or with Docker Compose:
