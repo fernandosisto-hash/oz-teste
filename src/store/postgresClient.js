@@ -55,8 +55,11 @@ async function initSchema() {
       cancelled_at TIMESTAMPTZ,
       notified_at TIMESTAMPTZ,
       notified_status TEXT,
-      dispatched_at TIMESTAMPTZ
+      dispatched_at TIMESTAMPTZ,
+      dispatch_meta JSONB
     );
+
+    ALTER TABLE tasks ADD COLUMN IF NOT EXISTS dispatch_meta JSONB;
 
     CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
     CREATE INDEX IF NOT EXISTS idx_tasks_priority_created ON tasks(priority, created_at);

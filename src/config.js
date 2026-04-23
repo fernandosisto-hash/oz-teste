@@ -14,6 +14,8 @@
  */
 
 const PROD_ENV = 'production';
+const VALID_EXECUTION_MODES = ['local', 'webhook', 'oz', 'miguel'];
+const VALID_MIGUEL_TARGETS = ['local', 'webhook', 'oz'];
 
 function nodeEnv() {
   return process.env.NODE_ENV || 'development';
@@ -34,6 +36,32 @@ function parseBoolEnv(name, fallback = false) {
   const raw = process.env[name];
   if (raw === undefined || raw === null || raw === '') return fallback;
   return String(raw).toLowerCase() === 'true';
+}
+
+function parseCsvEnv(name, fallback = []) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === null || raw === '') return fallback;
+  return String(raw)
+    .split(',')
+    .map((part) => part.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function defaultExecutionMode() {
+  const explicit = (process.env.DEFAULT_EXECUTION_MODE || '').trim().toLowerCase();
+  if (VALID_EXECUTION_MODES.includes(explicit)) return explicit;
+  return process.env.WARP_API_KEY ? 'oz' : 'local';
+}
+
+function miguelDispatchOrder() {
+  const parsed = parseCsvEnv('MIGUEL_DISPATCH_ORDER', ['oz', 'webhook', 'local']);
+  const deduped = [];
+  for (const mode of parsed) {
+    if (!VALID_MIGUEL_TARGETS.includes(mode)) continue;
+    if (deduped.includes(mode)) continue;
+    deduped.push(mode);
+  }
+  return deduped.length > 0 ? deduped : ['oz', 'webhook', 'local'];
 }
 
 /**
@@ -66,6 +94,14 @@ function get(key) {
       return process.env.WARP_API_KEY || null;
     case 'warpApiBase':
       return process.env.WARP_API_BASE || null;
+    case 'ozEnvironmentId':
+      return process.env.OZ_ENVIRONMENT_ID || null;
+    case 'defaultExecutionMode':
+      return defaultExecutionMode();
+    case 'miguelDispatchOrder':
+      return miguelDispatchOrder();
+    case 'miguelLocalFallback':
+      return parseBoolEnv('MIGUEL_LOCAL_FALLBACK', true);
     case 'tasksDataFile':
       return process.env.TASKS_DATA_FILE || null;
     case 'notificationsDataFile':
@@ -136,6 +172,25 @@ function validateForBoot() {
     );
   }
 
+  const configuredDefaultMode = (process.env.DEFAULT_EXECUTION_MODE || '').trim().toLowerCase();
+  if (configuredDefaultMode && !VALID_EXECUTION_MODES.includes(configuredDefaultMode)) {
+    errors.push(
+      `DEFAULT_EXECUTION_MODE must be one of ${VALID_EXECUTION_MODES.join(', ')} `
+        + `(got: ${process.env.DEFAULT_EXECUTION_MODE}).`,
+    );
+  }
+
+  const rawMiguelOrder = parseCsvEnv('MIGUEL_DISPATCH_ORDER', []);
+  const invalidMiguelTargets = rawMiguelOrder.filter(
+    (mode) => !VALID_MIGUEL_TARGETS.includes(mode),
+  );
+  if (invalidMiguelTargets.length > 0) {
+    errors.push(
+      `MIGUEL_DISPATCH_ORDER must contain only ${VALID_MIGUEL_TARGETS.join(', ')} `
+        + `(got: ${process.env.MIGUEL_DISPATCH_ORDER}).`,
+    );
+  }
+
   if (errors.length > 0) {
     const err = new Error(
       `Invalid configuration:\n  - ${errors.join('\n  - ')}`,
@@ -152,5 +207,13 @@ module.exports = {
   isProduction,
   validateForBoot,
   // Exposed for tests / debugging.
-  _internal: { parseIntEnv, parseBoolEnv },
+  _internal: {
+    parseIntEnv,
+    parseBoolEnv,
+    parseCsvEnv,
+    defaultExecutionMode,
+    miguelDispatchOrder,
+    VALID_EXECUTION_MODES,
+    VALID_MIGUEL_TARGETS,
+  },
 };

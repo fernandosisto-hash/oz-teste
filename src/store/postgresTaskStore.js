@@ -1,4 +1,5 @@
 const db = require('./postgresClient');
+const config = require('../config');
 
 function rowToTask(row) {
   if (!row) return null;
@@ -27,6 +28,7 @@ function rowToTask(row) {
     notifiedAt: row.notified_at && row.notified_at.toISOString(),
     notifiedStatus: row.notified_status,
     dispatchedAt: row.dispatched_at && row.dispatched_at.toISOString(),
+    dispatchMeta: row.dispatch_meta || null,
   };
 }
 
@@ -52,6 +54,7 @@ const PATCH_COLUMN_MAP = {
   notifiedAt: 'notified_at',
   notifiedStatus: 'notified_status',
   dispatchedAt: 'dispatched_at',
+  dispatchMeta: 'dispatch_meta',
 };
 
 async function init() {
@@ -89,7 +92,7 @@ async function add({
     [
       title,
       description || null,
-      executionMode || 'local',
+      executionMode || config.get('defaultExecutionMode'),
       'received',
       priority || 'normal',
       timeoutMs == null ? null : Number(timeoutMs),
@@ -118,7 +121,7 @@ async function updateExecution(id, patch) {
   let index = 1;
   for (const key of keys) {
     assignments.push(`${PATCH_COLUMN_MAP[key]} = $${index}`);
-    values.push(patch[key]);
+    values.push(key === 'dispatchMeta' ? JSON.stringify(patch[key]) : patch[key]);
     index += 1;
   }
   assignments.push(`updated_at = $${index}`);

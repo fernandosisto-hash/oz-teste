@@ -15,15 +15,15 @@ npm run lint  # run linter
 ```
 The server listens on `PORT` (default `3000`).
 ## Endpoints
-- `GET /health` — liveness probe, returns `{ "status": "ok" }`. **Open** (never auth-gated).
-- `GET /info` — returns package metadata, Node.js version and process uptime. **Open** (never auth-gated).
-- `POST /tasks` — intake a new task; body: `{ "title": "string", "description": "string", "executionMode": "local|webhook|oz", "priority": "low|normal|high", "timeoutMs": number, "maxRetries": number }`. New tasks start in status `received`. `priority`, `timeoutMs` and `maxRetries` are optional (see [Operational governance](#operational-governance)). **Protected** when `API_TOKEN` is set.
+- `GET /health` — liveness probe plus a lightweight dispatch/runtime snapshot. Returns `{ "status": "ok", "dispatch": { ... } }`. **Open** (never auth-gated).
+- `GET /info` — returns package metadata, Node.js version, process uptime and the current dispatch/runtime summary. **Open** (never auth-gated).
+- `POST /tasks` — intake a new task; body: `{ "title": "string", "description": "string", "executionMode": "local|webhook|oz|miguel", "priority": "low|normal|high", "timeoutMs": number, "maxRetries": number }`. New tasks start in status `received`. `priority`, `timeoutMs` and `maxRetries` are optional (see [Operational governance](#operational-governance)). `executionMode` now defaults from `DEFAULT_EXECUTION_MODE` (falling back to `oz` when `WARP_API_KEY` is set, otherwise `local`). **Protected** when `API_TOKEN` is set.
 - `GET /tasks` — list all tasks.
 - `GET /tasks/:id` — get a single task by id.
 - `PATCH /tasks/:id/status` — update task status; body: `{ "status": "pending|received|in_progress|done|failed|cancelled" }`. Invalid transitions (e.g. `done` → anything, `failed` → `done`) return `409`.
-- `POST /tasks/:id/dispatch` — dispatch a task through the orchestrator; optional body: `{ "mode": "local|webhook|oz" }`. Moves the task to `in_progress` and records `runId`, `sessionLink`, `dispatchedAt`, `dispatchMode`, `runState`, `completedAt`, `finishedAt`, `resultSummary` and (on failure) `lastError`. Terminal state (`done`/`failed`/`cancelled`) is set when the underlying run completes (or when auto-sync catches up, see below).
+- `POST /tasks/:id/dispatch` — dispatch a task through the orchestrator; optional body: `{ "mode": "local|webhook|oz|miguel" }`. Moves the task to `in_progress` and records `runId`, `sessionLink`, `dispatchedAt`, `dispatchMode`, `runState`, `completedAt`, `finishedAt`, `resultSummary`, `dispatchMeta` and (on failure) `lastError`. Terminal state (`done`/`failed`/`cancelled`) is set when the underlying run completes (or when auto-sync catches up, see below).
 - `POST /tasks/:id/cancel` — locally mark a task `cancelled` and emit a terminal notification. Valid from `received`, `pending`, or `in_progress`; returns `409` if the task is already in a terminal state. **Local cancel only** — the remote Oz run is NOT aborted; see [Operational governance](#operational-governance).
-- `POST /tasks/:id/retry` — re-dispatch a task that is in `failed` status. Optional body: `{ "mode": "local|webhook|oz" }`. Increments `retryCount` and fires a fresh terminal notification when the new cycle completes. Returns `409` if the task is not `failed` or the retry budget has been exhausted.
+- `POST /tasks/:id/retry` — re-dispatch a task that is in `failed` status. Optional body: `{ "mode": "local|webhook|oz|miguel" }`. Increments `retryCount` and fires a fresh terminal notification when the new cycle completes. Returns `409` if the task is not `failed` or the retry budget has been exhausted.
 - `POST /tasks/:id/sync` — force a single sync of a task against its Oz run. Returns the updated task. `409` if the task has no `runId` or is not an `oz`-dispatched task; `404` if the id is unknown. Already-terminal tasks are returned as-is.
 - `POST /tasks/sync` — reconcile every in-progress Oz task in one pass, visiting higher-priority tasks first. Returns `{ synced, results[] }`. Useful to manually advance pending tasks without waiting for the next auto-sync tick.
 - `GET /notifications` — list every terminal-state notification event that has been emitted. Optional query param `taskId` filters by task. Returns `{ notifications, total }`. **Protected** when `API_TOKEN` is set.
@@ -57,7 +57,14 @@ curl -s -X POST -H "Authorization: Bearer $API_TOKEN" \
 Token comparison uses `crypto.timingSafeEqual` to avoid trivial timing side-channels. Never hardcode the token — always provide it via the environment.
 ## Dispatch
 Dispatch modes:
-- `oz` (default when `WARP_API_KEY` is set): creates a **real Warp Oz
+- `miguel`: a small orchestration layer that evaluates `MIGUEL_DISPATCH_ORDER`
+  and chooses the first currently available target among `local`,
+  `webhook`, and `oz`. The decision is persisted on the task in
+  `dispatchMeta` (`requestedMode`, `resolvedMode`, `route`,
+  `availability`, `fallbackUsed`, `reason`) and is also surfaced by
+  `GET /health` and `GET /info`. If no target is available, the task is
+  failed with audit metadata instead of silently guessing.
+- `oz` (default when `WARP_API_KEY` is set unless `DEFAULT_EXECUTION_MODE` overrides it): creates a **real Warp Oz
   cloud agent run** via the REST API (`POST /api/v1/agent/run`). The
   task is persisted in `in_progress` with `runId`, `sessionLink` and
   the current `runState`. The dispatcher then briefly polls the run
@@ -65,7 +72,7 @@ Dispatch modes:
   task to `done`/`failed`/`cancelled`. Long-running Oz runs stay
   `in_progress` with the Warp `sessionLink` stored so an operator can
   follow the run in Warp.
-- `local` (default when `WARP_API_KEY` is not set): deterministic no-op
+- `local` (default when neither `DEFAULT_EXECUTION_MODE` nor `WARP_API_KEY` selects something else): deterministic no-op
   execution — the task is immediately marked `done`. Useful as a
   zero-config fallback / dev mode.
 - `webhook`: POSTs the task payload to `DISPATCH_WEBHOOK_URL`. A 2xx
@@ -81,9 +88,19 @@ in source):
 - `WARP_API_BASE` — optional. Override the Warp API base URL
   (default `https://app.warp.dev`). Useful for testing.
 - `DISPATCH_WEBHOOK_URL` — required for `webhook` mode.
+- `DEFAULT_EXECUTION_MODE` — optional. One of `local`, `webhook`, `oz`,
+  `miguel`. Applies when task creation omits `executionMode`.
+- `MIGUEL_DISPATCH_ORDER` — optional. Comma-separated target order used
+  by `miguel` mode. Allowed values: `local`, `webhook`, `oz`.
+  Default: `oz,webhook,local`.
+- `MIGUEL_LOCAL_FALLBACK` — optional boolean (default `true`). When
+  `false`, `miguel` treats the local executor as unavailable and can
+  fail closed if no remote target is ready.
 Example:
 ```bash
 export WARP_API_KEY=wk-...
+export DEFAULT_EXECUTION_MODE=miguel
+export MIGUEL_DISPATCH_ORDER=oz,webhook,local
 export OZ_ENVIRONMENT_ID=pLTnDripE1BVfLpDxBrKQJ   # optional
 npm start
 ```
@@ -155,6 +172,12 @@ Any other requested transition returns `409 { "error": "invalid transition: ..."
   when `TASKS_DATA_FILE` / `NOTIFICATIONS_DATA_FILE` are not set.
 - `STORE_BACKUP_LIMIT` — optional. How many rotating backup copies to
   keep for each JSON store. Default `3`. Set `0` to disable backups.
+- `DEFAULT_EXECUTION_MODE` — optional. Default `executionMode` applied
+  during task creation.
+- `MIGUEL_DISPATCH_ORDER` — optional. Target order evaluated by
+  `executionMode=miguel`.
+- `MIGUEL_LOCAL_FALLBACK` — optional. Enables/disables local fallback
+  inside `miguel` mode.
 ### Limits
 - Cancellation and timeouts are local only; they do not abort a
   remote Oz run.
@@ -210,6 +233,10 @@ if any of the following rules fail:
   protected routes would be open).
 - `PORT` must be a valid TCP port.
 - `LOG_LEVEL` must be one of `debug`, `info`, `warn`, `error`.
+- `DEFAULT_EXECUTION_MODE`, when set, must be one of `local`,
+  `webhook`, `oz`, `miguel`.
+- `MIGUEL_DISPATCH_ORDER`, when set, must contain only `local`,
+  `webhook`, `oz`.
 Recognised variables (beyond the ones already listed above):
 - `NODE_ENV` — `development` (default) or `production`. Controls the
   boot-time token enforcement and whether 500 responses include a
@@ -241,6 +268,10 @@ Structured JSON lines on stdout/stderr. Every HTTP request emits one
 `durationMs`. The request id is also returned to the client in the
 `X-Request-Id` response header, and an inbound `X-Request-Id` header
 is honoured so end-to-end traces can be correlated across services.
+
+Dispatch now also emits `dispatch_selected`, `dispatch_finished`, and
+`dispatch_unresolved` records so the chosen target and fallback path are
+observable without opening the task store by hand.
 ## Graceful shutdown
 On `SIGTERM` or `SIGINT`, `src/index.js` stops the auto-sync timer,
 closes the HTTP server (draining in-flight requests), and exits. A
@@ -315,9 +346,10 @@ No database is used; the file is rewritten on every mutation.
 ## Project layout
 ```
 src/
-  index.js                 # entry point, starts the HTTP server + auto-sync loop
-  app.js                   # Express app configuration
-  dispatcher.js            # task orchestration (local + webhook + oz modes)
+	index.js                 # entry point, starts the HTTP server + auto-sync loop
+	app.js                   # Express app configuration
+	orchestration.js         # miguel routing + dispatch availability summary
+	dispatcher.js            # task orchestration (local + webhook + oz modes)
   syncService.js           # auto-sync loop + single-task/bulk sync helpers
   notificationService.js   # terminal-state notification emit + webhook delivery
   governance.js            # priority / timeout / retry / transition helpers
@@ -337,8 +369,9 @@ src/
 test/
   autoSync.test.js         # integration test: dispatch + auto-sync vs mock Oz
   notifications.test.js    # integration test: terminal-state notifications
-  auth.test.js             # integration test: API_TOKEN auth on protected routes
-  governance.test.js       # integration test: priority, cancel, retry, timeout, transitions
+	auth.test.js             # integration test: API_TOKEN auth on protected routes
+	governance.test.js       # integration test: priority, cancel, retry, timeout, transitions
+	miguelDispatch.test.js   # integration test: miguel orchestration + health/info exposure
 data/
   tasks.json               # runtime task data (gitignored)
   notifications.json       # runtime notification audit trail (gitignored)

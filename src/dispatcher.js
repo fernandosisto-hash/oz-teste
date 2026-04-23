@@ -1,18 +1,20 @@
 const crypto = require('crypto');
+const config = require('./config');
+const logger = require('./logger');
 const taskStore = require('./store/taskStore');
 const ozClient = require('./ozClient');
 const { mapOzState } = require('./ozStateMap');
 const notificationService = require('./notificationService');
+const orchestration = require('./orchestration');
 
-const VALID_MODES = ['local', 'webhook', 'oz'];
+const { VALID_MODES } = orchestration;
 
 function newRunId() {
   return crypto.randomUUID();
 }
 
 function defaultMode(task) {
-  if (task && task.executionMode) return task.executionMode;
-  return ozClient.isConfigured() ? 'oz' : 'local';
+  return orchestration.resolvePlan({ task }).requestedMode;
 }
 
 async function runLocal(task) {
@@ -26,7 +28,7 @@ async function runLocal(task) {
 }
 
 async function runWebhook(task) {
-  const url = process.env.DISPATCH_WEBHOOK_URL;
+  const url = config.get('dispatchWebhookUrl');
   if (!url) {
     return {
       ok: false,
@@ -145,16 +147,21 @@ async function execute(task, mode) {
 }
 
 async function dispatch(task, { mode } = {}) {
-  const dispatchMode = mode || defaultMode(task);
-  if (!VALID_MODES.includes(dispatchMode)) {
-    const err = new Error(
-      `invalid dispatch mode '${dispatchMode}', expected one of: ${VALID_MODES.join(', ')}`,
-    );
-    err.code = 'INVALID_MODE';
-    throw err;
-  }
-
+  const plan = orchestration.resolvePlan({ task, mode });
+  const dispatchMode = plan.dispatchMode;
   const dispatchedAt = new Date().toISOString();
+  const dispatchMeta = {
+    ...plan.meta,
+    decidedAt: dispatchedAt,
+  };
+
+  logger.info('dispatch_selected', {
+    taskId: task.id,
+    requestedMode: plan.requestedMode,
+    resolvedMode: dispatchMode,
+    orchestrator: dispatchMeta.orchestrator,
+    fallbackUsed: dispatchMeta.fallbackUsed,
+  });
 
   await taskStore.updateExecution(task.id, {
     status: 'in_progress',
@@ -169,9 +176,38 @@ async function dispatch(task, { mode } = {}) {
     lastError: null,
     timedOut: false,
     cancelledAt: null,
+    dispatchMeta,
   });
 
-  const result = await execute(task, dispatchMode);
+  const executionTask = {
+    ...task,
+    dispatchMode,
+    dispatchMeta,
+    dispatchedAt,
+  };
+
+  if (!dispatchMode) {
+    const completedAt = new Date().toISOString();
+    const failed = await taskStore.updateExecution(task.id, {
+      status: 'failed',
+      completedAt,
+      finishedAt: completedAt,
+      lastError: 'miguel could not resolve an available dispatch target',
+      dispatchMeta: {
+        ...dispatchMeta,
+        reason: 'miguel could not resolve an available dispatch target',
+      },
+    });
+    await notificationService.notifyIfTerminal(failed);
+    logger.warn('dispatch_unresolved', {
+      taskId: task.id,
+      requestedMode: plan.requestedMode,
+      orchestrator: dispatchMeta.orchestrator,
+    });
+    return (await taskStore.getById(task.id)) || failed;
+  }
+
+  const result = await execute(executionTask, dispatchMode);
   const completedAt = result.terminal ? new Date().toISOString() : null;
 
   const patch = {
@@ -182,9 +218,23 @@ async function dispatch(task, { mode } = {}) {
     completedAt,
     finishedAt: completedAt,
     lastError: result.error || result.pollError || null,
+    dispatchMeta: {
+      ...dispatchMeta,
+      resolvedMode: dispatchMode,
+      completedAt: result.terminal ? completedAt : null,
+    },
   };
 
   const updated = await taskStore.updateExecution(task.id, patch);
+
+  logger.info('dispatch_finished', {
+    taskId: task.id,
+    requestedMode: plan.requestedMode,
+    resolvedMode: dispatchMode,
+    status: updated && updated.status,
+    terminal: Boolean(result.terminal),
+    runId: updated && updated.runId,
+  });
 
   if (result.terminal) {
     await notificationService.notifyIfTerminal(updated);
@@ -199,4 +249,5 @@ module.exports = {
   VALID_MODES,
   _defaultMode: defaultMode,
   _execute: execute,
+  _resolvePlan: orchestration.resolvePlan,
 };

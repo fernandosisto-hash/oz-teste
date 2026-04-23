@@ -13,14 +13,16 @@
  * This module keeps no state and is safe to require multiple times.
  */
 
+const config = require('./config');
+
 const DEFAULT_API_BASE = 'https://app.warp.dev';
 
 function apiBase() {
-  return (process.env.WARP_API_BASE || DEFAULT_API_BASE).replace(/\/+$/, '');
+  return (config.get('warpApiBase') || DEFAULT_API_BASE).replace(/\/+$/, '');
 }
 
 function apiKey() {
-  const key = process.env.WARP_API_KEY;
+  const key = config.get('warpApiKey');
   if (!key) {
     const err = new Error(
       'WARP_API_KEY is not set; cannot dispatch to Oz. Export WARP_API_KEY before running.',
@@ -83,7 +85,7 @@ async function createRun({ prompt, environmentId, name } = {}) {
   }
 
   const body = { prompt };
-  const envId = environmentId || process.env.OZ_ENVIRONMENT_ID;
+  const envId = environmentId || config.get('ozEnvironmentId');
   if (envId) body.config = { environment_id: envId };
   if (name) body.name = name;
 
@@ -118,7 +120,7 @@ async function getRun(runId) {
 }
 
 function isConfigured() {
-  return Boolean(process.env.WARP_API_KEY);
+  return Boolean(config.get('warpApiKey'));
 }
 
 module.exports = {

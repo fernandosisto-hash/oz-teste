@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const config = require('./config');
 const taskStore = require('./store/taskStore');
 const notificationStore = require('./store/notificationStore');
 
@@ -62,7 +63,7 @@ async function notifyIfTerminal(task, { logger = console } = {}) {
   const emittedAt = new Date().toISOString();
   const payload = buildPayload(task, emittedAt);
 
-  const url = process.env.NOTIFICATION_WEBHOOK_URL;
+  const url = config.get('notificationWebhookUrl');
   let delivery;
   if (url) {
     delivery = await deliverWebhook(payload, url);

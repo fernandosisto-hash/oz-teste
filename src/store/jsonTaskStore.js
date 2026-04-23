@@ -68,12 +68,13 @@ function add({
       id: snapshot.nextId,
       title,
       description: description || null,
-      executionMode: executionMode || 'local',
+      executionMode: executionMode || config.get('defaultExecutionMode'),
       status: 'received',
       priority: priority || 'normal',
       timeoutMs: timeoutMs == null ? null : Number(timeoutMs),
       retryCount: 0,
       maxRetries: Number.isFinite(maxRetries) ? Number(maxRetries) : null,
+      dispatchMeta: null,
       createdAt: new Date().toISOString(),
     };
 
