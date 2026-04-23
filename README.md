@@ -151,6 +151,10 @@ Any other requested transition returns `409 { "error": "invalid transition: ..."
 - `MAX_TASK_RETRIES` — optional. Default retry budget for tasks that
   do not specify their own `maxRetries`. Non-negative integer;
   defaults to `3`.
+- `DATA_DIR` — optional. Base directory for the local JSON stores
+  when `TASKS_DATA_FILE` / `NOTIFICATIONS_DATA_FILE` are not set.
+- `STORE_BACKUP_LIMIT` — optional. How many rotating backup copies to
+  keep for each JSON store. Default `3`. Set `0` to disable backups.
 ### Limits
 - Cancellation and timeouts are local only; they do not abort a
   remote Oz run.
@@ -194,9 +198,54 @@ quiets down once everything has resolved.
 - Non-`oz` dispatch modes (`local`, `webhook`) are driven to terminal
   synchronously during dispatch and are never touched by auto-sync.
 - Optional shared-secret auth via `API_TOKEN`; no full user system, database, OAuth, JWT infrastructure, or Docker/CI/deploy config.
+- Persistence is still file-based JSON, but writes are now atomic and each save keeps rotating backup files (`.bak.1`, `.bak.2`, ...), which reduces the risk of losing all state on a partial write or corruption.
 - Re-dispatching a task that is already `in_progress` is rejected; set
   the task to `failed` via `PATCH /tasks/:id/status` if you need to
   retry an Oz run.
+## Operational configuration
+All environment variables are read through `src/config.js`. At boot,
+`src/index.js` calls `config.validateForBoot()` and aborts the process
+if any of the following rules fail:
+- `NODE_ENV=production` requires `API_TOKEN` to be set (otherwise the
+  protected routes would be open).
+- `PORT` must be a valid TCP port.
+- `LOG_LEVEL` must be one of `debug`, `info`, `warn`, `error`.
+Recognised variables (beyond the ones already listed above):
+- `NODE_ENV` — `development` (default) or `production`. Controls the
+  boot-time token enforcement and whether 500 responses include a
+  `debug` field.
+- `PORT` — TCP port (default `3000`).
+- `LOG_LEVEL` — logger threshold (default `info`).
+- `JSON_BODY_LIMIT` — max request body for `express.json` (default
+  `100kb`). Exceeding it returns `413 { "error": "request body too
+  large", "code": "PAYLOAD_TOO_LARGE" }`.
+- `TRUST_PROXY` — when set, passed to `app.set('trust proxy', ...)` so
+  `X-Forwarded-For` / `X-Forwarded-Proto` are honoured behind a
+  reverse proxy. Leave unset locally.
+## Errors
+Unhandled errors and 404s go through a global handler
+(`src/middleware/errorHandler.js`) that returns a stable shape:
+```json
+{ "error": "...", "code": "...", "details": { } }
+```
+- 4xx responses include the original message.
+- 5xx responses are redacted to `"internal error"` (the full error is
+  logged server-side with the request id). In non-production
+  environments an extra `debug` field mirrors the message to speed up
+  local debugging.
+- Malformed JSON returns `400 { "code": "INVALID_JSON" }`.
+- Oversized bodies return `413 { "code": "PAYLOAD_TOO_LARGE" }`.
+## Logs
+Structured JSON lines on stdout/stderr. Every HTTP request emits one
+`http_request` record with `requestId`, `method`, `path`, `status`,
+`durationMs`. The request id is also returned to the client in the
+`X-Request-Id` response header, and an inbound `X-Request-Id` header
+is honoured so end-to-end traces can be correlated across services.
+## Graceful shutdown
+On `SIGTERM` or `SIGINT`, `src/index.js` stops the auto-sync timer,
+closes the HTTP server (draining in-flight requests), and exits. A
+10-second watchdog ensures a stuck connection cannot block shutdown
+indefinitely.
 ## Terminal-state notifications
 When a task reaches a terminal state (`done`, `failed`, or
 `cancelled`) — whether via fast dispatch (`local` / `webhook` /

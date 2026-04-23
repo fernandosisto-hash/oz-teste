@@ -1,13 +1,16 @@
-/* eslint-disable no-console */
 const crypto = require('node:crypto');
+const config = require('../config');
+const logger = require('../logger');
 
 /**
  * Minimal shared-secret API authentication.
  *
  * Behavior:
  *  - If the `API_TOKEN` environment variable is not set, the middleware
- *    logs a one-time warning at require-time and lets every request
- *    through. This keeps zero-config/dev usage friction-free.
+ *    logs a one-time warning and lets every request through. This
+ *    keeps zero-config/dev usage friction-free. In production the
+ *    missing token is instead surfaced at boot time by
+ *    `config.validateForBoot()`, which aborts the process.
  *  - If `API_TOKEN` is set, every protected request must present a
  *    matching token via either:
  *        Authorization: Bearer <token>
@@ -47,13 +50,17 @@ function tokensMatch(expected, provided) {
 }
 
 function requireAuth(req, res, next) {
-  const expected = process.env.API_TOKEN;
+  // Read via config so the env var name stays centralized, but keep
+  // resolution dynamic so tests that mutate process.env across
+  // requests continue to work.
+  const expected = config.get('apiToken');
   if (!expected) {
     if (!warned) {
-      console.warn(
-        '[auth] API_TOKEN is not set — protected routes are OPEN. '
+      logger.warn('auth_open', {
+        detail:
+          'API_TOKEN is not set — protected routes are OPEN. '
           + 'Set API_TOKEN to require a shared secret.',
-      );
+      });
       warned = true;
     }
     return next();

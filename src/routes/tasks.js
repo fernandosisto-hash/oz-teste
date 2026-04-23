@@ -5,6 +5,7 @@ const syncService = require('../syncService');
 const notificationStore = require('../store/notificationStore');
 const notificationService = require('../notificationService');
 const governance = require('../governance');
+const validation = require('../validation');
 
 const router = express.Router();
 
@@ -28,7 +29,8 @@ const VALID_STATUSES = [
  *   executionMode?: 'local' | 'webhook'
  * }
  */
-router.post('/', (req, res) => {
+router.post('/', async (req, res, next) => {
+  try {
   const {
     title,
     description,
@@ -38,69 +40,72 @@ router.post('/', (req, res) => {
     maxRetries,
   } = req.body || {};
 
-  if (!title || typeof title !== 'string' || !title.trim()) {
-    return res.status(400).json({ error: 'title is required' });
-  }
+  // Consistent validation via shared helpers. Each returns
+  // { ok, value?, error? } and the 400 response shape is stable.
+  const titleCheck = validation.asNonEmptyString('title', title);
+  if (!titleCheck.ok) return validation.badRequest(res, titleCheck.error);
 
-  if (executionMode && !dispatcher.VALID_MODES.includes(executionMode)) {
-    return res.status(400).json({
-      error: `executionMode must be one of: ${dispatcher.VALID_MODES.join(', ')}`,
-    });
-  }
+  const modeCheck = validation.asEnum(
+    'executionMode',
+    executionMode,
+    dispatcher.VALID_MODES,
+    { optional: true },
+  );
+  if (!modeCheck.ok) return validation.badRequest(res, modeCheck.error);
 
   const normalizedPriority = governance.normalizePriority(priority);
   if (normalizedPriority === null) {
-    return res.status(400).json({
-      error: `priority must be one of: ${governance.VALID_PRIORITIES.join(', ')}`,
-    });
+    return validation.badRequest(
+      res,
+      `priority must be one of: ${governance.VALID_PRIORITIES.join(', ')}`,
+    );
   }
 
   const timeoutCheck = governance.normalizeTimeoutMs(timeoutMs);
-  if (!timeoutCheck.ok) {
-    return res.status(400).json({ error: timeoutCheck.error });
-  }
+  if (!timeoutCheck.ok) return validation.badRequest(res, timeoutCheck.error);
 
-  if (
-    maxRetries !== undefined
-    && maxRetries !== null
-    && (!Number.isFinite(Number(maxRetries)) || Number(maxRetries) < 0)
-  ) {
-    return res.status(400).json({
-      error: 'maxRetries must be a non-negative integer',
-    });
-  }
+  const retriesCheck = validation.asNonNegativeInt('maxRetries', maxRetries);
+  if (!retriesCheck.ok) return validation.badRequest(res, retriesCheck.error);
 
-  const task = taskStore.add({
-    title: title.trim(),
+  const task = await taskStore.add({
+    title: titleCheck.value,
     description: description ? String(description).trim() : null,
     executionMode,
     priority: normalizedPriority,
     timeoutMs: timeoutCheck.value,
-    maxRetries:
-      maxRetries === undefined || maxRetries === null
-        ? null
-        : Math.floor(Number(maxRetries)),
+    maxRetries: retriesCheck.value,
   });
   return res.status(201).json(task);
+  } catch (err) {
+    return next(err);
+  }
 });
 
 /**
  * GET /tasks
  * List all tasks.
  */
-router.get('/', (req, res) => {
-  const tasks = taskStore.getAll();
+router.get('/', async (req, res, next) => {
+  try {
+  const tasks = await taskStore.getAll();
   res.json({ tasks, total: tasks.length });
+  } catch (err) {
+    next(err);
+  }
 });
 
 /**
  * GET /tasks/:id
  * Get a single task by id.
  */
-router.get('/:id', (req, res) => {
-  const task = taskStore.getById(req.params.id);
+router.get('/:id', async (req, res, next) => {
+  try {
+  const task = await taskStore.getById(req.params.id);
   if (!task) return res.status(404).json({ error: 'task not found' });
   return res.json(task);
+  } catch (err) {
+    return next(err);
+  }
 });
 
 /**
@@ -109,11 +114,15 @@ router.get('/:id', (req, res) => {
  * for this task (usually zero or one; more if the task legitimately
  * re-enters a different terminal state).
  */
-router.get('/:id/notifications', (req, res) => {
-  const task = taskStore.getById(req.params.id);
+router.get('/:id/notifications', async (req, res, next) => {
+  try {
+  const task = await taskStore.getById(req.params.id);
   if (!task) return res.status(404).json({ error: 'task not found' });
-  const events = notificationStore.getByTaskId(req.params.id);
+  const events = await notificationStore.getByTaskId(req.params.id);
   return res.json({ notifications: events, total: events.length });
+  } catch (err) {
+    return next(err);
+  }
 });
 
 /**
@@ -121,7 +130,8 @@ router.get('/:id/notifications', (req, res) => {
  * Update the status of a task.
  * Body: { status: 'pending' | 'in_progress' | 'done' | 'cancelled' }
  */
-router.patch('/:id/status', (req, res) => {
+router.patch('/:id/status', async (req, res, next) => {
+  try {
   const { status } = req.body || {};
   if (!status || !VALID_STATUSES.includes(status)) {
     return res.status(400).json({
@@ -129,7 +139,7 @@ router.patch('/:id/status', (req, res) => {
     });
   }
 
-  const existing = taskStore.getById(req.params.id);
+  const existing = await taskStore.getById(req.params.id);
   if (!existing) return res.status(404).json({ error: 'task not found' });
 
   if (!governance.isValidTransition(existing.status, status)) {
@@ -138,8 +148,11 @@ router.patch('/:id/status', (req, res) => {
     });
   }
 
-  const task = taskStore.updateStatus(req.params.id, status);
+  const task = await taskStore.updateStatus(req.params.id, status);
   return res.json(task);
+  } catch (err) {
+    return next(err);
+  }
 });
 
 /**
@@ -177,7 +190,7 @@ router.post('/sync', async (req, res, next) => {
  * 409 for tasks that cannot be synced (missing runId or non-oz mode).
  */
 router.post('/:id/sync', async (req, res, next) => {
-  const task = taskStore.getById(req.params.id);
+  const task = await taskStore.getById(req.params.id);
   if (!task) return res.status(404).json({ error: 'task not found' });
 
   try {
@@ -195,7 +208,7 @@ router.post('/:id/sync', async (req, res, next) => {
 });
 
 router.post('/:id/dispatch', async (req, res, next) => {
-  const task = taskStore.getById(req.params.id);
+  const task = await taskStore.getById(req.params.id);
   if (!task) return res.status(404).json({ error: 'task not found' });
 
   const dispatchable = ['received', 'pending', 'failed'];
@@ -231,7 +244,7 @@ router.post('/:id/dispatch', async (req, res, next) => {
  * `sessionLink` to inspect the remote run in Warp.
  */
 router.post('/:id/cancel', async (req, res, next) => {
-  const task = taskStore.getById(req.params.id);
+  const task = await taskStore.getById(req.params.id);
   if (!task) return res.status(404).json({ error: 'task not found' });
 
   if (governance.isTerminalStatus(task.status)) {
@@ -241,7 +254,7 @@ router.post('/:id/cancel', async (req, res, next) => {
   }
 
   const now = new Date().toISOString();
-  const updated = taskStore.updateExecution(task.id, {
+  const updated = await taskStore.updateExecution(task.id, {
     status: 'cancelled',
     cancelledAt: now,
     completedAt: task.completedAt || now,
@@ -254,7 +267,7 @@ router.post('/:id/cancel', async (req, res, next) => {
     return next(err);
   }
 
-  const finalTask = taskStore.getById(task.id) || updated;
+  const finalTask = (await taskStore.getById(task.id)) || updated;
   return res.status(200).json(finalTask);
 });
 
@@ -273,7 +286,7 @@ router.post('/:id/cancel', async (req, res, next) => {
  * emitted when the retry completes.
  */
 router.post('/:id/retry', async (req, res, next) => {
-  const task = taskStore.getById(req.params.id);
+  const task = await taskStore.getById(req.params.id);
   if (!task) return res.status(404).json({ error: 'task not found' });
 
   if (task.status !== 'failed') {
@@ -298,7 +311,7 @@ router.post('/:id/retry', async (req, res, next) => {
   // notification stamp is cleared so the next terminal state fires
   // a new event; `lastError` and `timedOut` are cleared to avoid
   // stale metadata bleeding through.
-  const reset = taskStore.updateExecution(task.id, {
+  const reset = await taskStore.updateExecution(task.id, {
     status: 'received',
     retryCount: used + 1,
     lastError: null,

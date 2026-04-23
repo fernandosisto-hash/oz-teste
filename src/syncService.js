@@ -62,7 +62,7 @@ async function syncTask(taskOrId) {
   const task =
     typeof taskOrId === 'object' && taskOrId !== null
       ? taskOrId
-      : taskStore.getById(taskOrId);
+      : await taskStore.getById(taskOrId);
 
   if (!task) {
     return { ok: false, error: 'task not found', task: null };
@@ -78,7 +78,7 @@ async function syncTask(taskOrId) {
   // README for the limits of local cancellation semantics.
   if (governance.hasTimedOut(task)) {
     const now = new Date().toISOString();
-    const updated = taskStore.updateExecution(task.id, {
+    const updated = await taskStore.updateExecution(task.id, {
       status: 'failed',
       timedOut: true,
       lastError: `task timed out after ${task.timeoutMs}ms`,
@@ -86,7 +86,7 @@ async function syncTask(taskOrId) {
       finishedAt: now,
     });
     await notificationService.notifyIfTerminal(updated);
-    const finalTask = taskStore.getById(task.id) || updated;
+    const finalTask = (await taskStore.getById(task.id)) || updated;
     return { ok: true, terminal: true, timedOut: true, task: finalTask };
   }
 
@@ -106,7 +106,7 @@ async function syncTask(taskOrId) {
   try {
     run = await ozClient.getRun(task.runId);
   } catch (err) {
-    const updated = taskStore.updateExecution(task.id, {
+    const updated = await taskStore.updateExecution(task.id, {
       lastError: `sync failed: ${err.message}`,
     });
     return { ok: false, error: err.message, task: updated };
@@ -138,7 +138,7 @@ async function syncTask(taskOrId) {
     patch.finishedAt = now;
   }
 
-  const updated = taskStore.updateExecution(task.id, patch);
+  const updated = await taskStore.updateExecution(task.id, patch);
 
   // On transition into a terminal state, fire the notification. The
   // service itself is idempotent (notifiedStatus guard), so double
@@ -146,7 +146,7 @@ async function syncTask(taskOrId) {
   let finalTask = updated;
   if (isTerminal) {
     await notificationService.notifyIfTerminal(updated);
-    finalTask = taskStore.getById(task.id) || updated;
+    finalTask = (await taskStore.getById(task.id)) || updated;
   }
 
   return { ok: true, terminal: isTerminal, task: finalTask };
@@ -157,8 +157,7 @@ async function syncTask(taskOrId) {
  * results in the same shape as `syncTask`.
  */
 async function syncInProgressTasks() {
-  const candidates = taskStore
-    .getAll()
+  const candidates = (await taskStore.getAll())
     .filter((t) => isSyncable(t) || governance.hasTimedOut(t))
     .sort(governance.comparePriority);
   const results = [];

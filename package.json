@@ -6,11 +6,12 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
-    "test": "node test/autoSync.test.js && node test/notifications.test.js && node test/auth.test.js && node test/governance.test.js",
+    "test": "node test/persistence.test.js && node test/autoSync.test.js && node test/notifications.test.js && node test/auth.test.js && node test/governance.test.js",
     "lint": "echo \"No linter configured yet\" && exit 0"
   },
   "dependencies": {
-    "express": "^4.18.2"
+    "express": "^4.18.2",
+    "pg": "^8.20.0"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"
