@@ -7,7 +7,7 @@
     "start": "node src/index.js",
     "start:prod": "node --env-file=.env.production src/index.js",
     "dev": "nodemon src/index.js",
-    "test": "node test/persistence.test.js && node test/autoSync.test.js && node test/notifications.test.js && node test/auth.test.js && node test/governance.test.js && node test/miguelDispatch.test.js",
+    "test": "node test/persistence.test.js && node test/autoSync.test.js && node test/notifications.test.js && node test/auth.test.js && node test/governance.test.js && node test/miguelDispatch.test.js && node test/config.test.js",
     "lint": "echo \"No linter configured yet\" && exit 0"
   },
   "dependencies": {

@@ -191,6 +191,36 @@ function validateForBoot() {
     );
   }
 
+  if (configuredDefaultMode === 'oz' && !get('warpApiKey')) {
+    errors.push(
+      'DEFAULT_EXECUTION_MODE=oz requires WARP_API_KEY to be set.',
+    );
+  }
+
+  if (configuredDefaultMode === 'webhook' && !get('dispatchWebhookUrl')) {
+    errors.push(
+      'DEFAULT_EXECUTION_MODE=webhook requires DISPATCH_WEBHOOK_URL to be set.',
+    );
+  }
+
+  if (configuredDefaultMode === 'miguel') {
+    const miguelOrder = miguelDispatchOrder();
+    const localFallback = get('miguelLocalFallback');
+    const remoteReady = miguelOrder.some((mode) => {
+      if (mode === 'oz') return Boolean(get('warpApiKey'));
+      if (mode === 'webhook') return Boolean(get('dispatchWebhookUrl'));
+      if (mode === 'local') return localFallback;
+      return false;
+    });
+
+    if (!remoteReady) {
+      errors.push(
+        'DEFAULT_EXECUTION_MODE=miguel requires at least one reachable target from MIGUEL_DISPATCH_ORDER '
+          + '(configure WARP_API_KEY, DISPATCH_WEBHOOK_URL, or enable MIGUEL_LOCAL_FALLBACK).',
+      );
+    }
+  }
+
   if (errors.length > 0) {
     const err = new Error(
       `Invalid configuration:\n  - ${errors.join('\n  - ')}`,

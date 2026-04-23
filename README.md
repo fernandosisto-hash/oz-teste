@@ -1,5 +1,9 @@
 # oz-teste
 Node.js + Express API skeleton with a first-pass Warp Oz task dispatcher.
+
+Arquivos de apoio desta fase:
+- `RUNBOOK.md` — subida, operação e checklist
+- `MIGUEL_LAYER_CONTRACT.md` — contrato da camada MiguelAntônio/orquestração
 ## Requirements
 - Node.js >= 18
 ## Install
@@ -240,6 +244,9 @@ if any of the following rules fail:
   `webhook`, `oz`, `miguel`.
 - `MIGUEL_DISPATCH_ORDER`, when set, must contain only `local`,
   `webhook`, `oz`.
+- `DEFAULT_EXECUTION_MODE=oz` requires `WARP_API_KEY`.
+- `DEFAULT_EXECUTION_MODE=webhook` requires `DISPATCH_WEBHOOK_URL`.
+- `DEFAULT_EXECUTION_MODE=miguel` requires at least one reachable target from the configured order.
 Recognised variables (beyond the ones already listed above):
 - `NODE_ENV` — `development` (default) or `production`. Controls the
   boot-time token enforcement and whether 500 responses include a
@@ -408,6 +415,7 @@ test/
 	auth.test.js             # integration test: API_TOKEN auth on protected routes
 	governance.test.js       # integration test: priority, cancel, retry, timeout, transitions
 	miguelDispatch.test.js   # integration test: miguel orchestration + health/info exposure
+	config.test.js           # boot/config hardening checks
 data/
   tasks.json               # runtime task data (gitignored)
   notifications.json       # runtime notification audit trail (gitignored)
