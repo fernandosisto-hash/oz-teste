@@ -1,6 +1,8 @@
 node_modules/
 package-lock.json
 .env
+.env.production
+.env.production.local
 .env.local
 *.log
 
