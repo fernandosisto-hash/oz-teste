@@ -1,20 +1,16 @@
 const express = require('express');
-const config = require('../config');
-const orchestration = require('../orchestration');
+const runtimeStatus = require('../runtimeStatus');
 
 const router = express.Router();
 
-router.get('/', (req, res) => {
-  const runtime = orchestration.runtimeSummary();
-  res.json({
-    status: 'ok',
-    storageBackend: config.get('storageBackend'),
-    dispatch: {
-      defaultExecutionMode: runtime.defaultExecutionMode,
-      resolvedDefaultMode: runtime.resolvedDefaultMode,
-      miguel: runtime.miguel,
-    },
-  });
+router.get('/', async (_req, res, next) => {
+  try {
+    const payload = await runtimeStatus.build();
+    const httpStatus = payload.status === 'ok' ? 200 : 503;
+    res.status(httpStatus).json(payload);
+  } catch (err) {
+    next(err);
+  }
 });
 
 module.exports = router;

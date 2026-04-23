@@ -192,11 +192,15 @@ function request(port, { method, path: urlPath, headers = {}, body = null }) {
     const health = await request(port, { method: 'GET', path: '/health' });
     assert.equal(health.status, 200);
     assert.equal(health.body.status, 'ok');
+    assert.equal(health.body.checks.storage.ok, true);
+    assert.equal(health.body.env.apiTokenConfigured, true);
     console.log('[ok] /health is open even when API_TOKEN is set');
 
     const info = await request(port, { method: 'GET', path: '/info' });
     assert.equal(info.status, 200);
     assert.ok(info.body.name, 'info should expose app name');
+    assert.equal(info.body.checks.storage.ok, true);
+    assert.equal(info.body.env.storageBackend, 'json');
     console.log('[ok] /info is open even when API_TOKEN is set');
 
     // ---------------------------------------------------------------

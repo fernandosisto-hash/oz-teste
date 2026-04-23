@@ -6,6 +6,8 @@ Node.js + Express API skeleton with a first-pass Warp Oz task dispatcher.
 ```bash
 npm install
 ```
+Copy `.env.example` to `.env` (or export env vars directly) before the
+first non-trivial run.
 ## Run
 ```bash
 npm start     # start the server
@@ -15,8 +17,8 @@ npm run lint  # run linter
 ```
 The server listens on `PORT` (default `3000`).
 ## Endpoints
-- `GET /health` — liveness probe plus a lightweight dispatch/runtime snapshot. Returns `{ "status": "ok", "dispatch": { ... } }`. **Open** (never auth-gated).
-- `GET /info` — returns package metadata, Node.js version, process uptime and the current dispatch/runtime summary. **Open** (never auth-gated).
+- `GET /health` — liveness/readiness probe plus runtime snapshot. Returns `status`, `checks.storage`, `env`, and `dispatch`. Responds `200` when healthy or `503` when the selected storage backend is degraded. **Open** (never auth-gated).
+- `GET /info` — returns package metadata, Node.js version, process uptime, env summary, runtime checks, and dispatch summary. **Open** (never auth-gated).
 - `POST /tasks` — intake a new task; body: `{ "title": "string", "description": "string", "executionMode": "local|webhook|oz|miguel", "priority": "low|normal|high", "timeoutMs": number, "maxRetries": number }`. New tasks start in status `received`. `priority`, `timeoutMs` and `maxRetries` are optional (see [Operational governance](#operational-governance)). `executionMode` now defaults from `DEFAULT_EXECUTION_MODE` (falling back to `oz` when `WARP_API_KEY` is set, otherwise `local`). **Protected** when `API_TOKEN` is set.
 - `GET /tasks` — list all tasks.
 - `GET /tasks/:id` — get a single task by id.
@@ -272,6 +274,10 @@ is honoured so end-to-end traces can be correlated across services.
 Dispatch now also emits `dispatch_selected`, `dispatch_finished`, and
 `dispatch_unresolved` records so the chosen target and fallback path are
 observable without opening the task store by hand.
+
+`GET /health` now performs a lightweight storage readiness check:
+- `json` backend → verifies the tasks/notifications directories are readable+writable
+- `postgres` backend → runs `SELECT 1`
 ## Graceful shutdown
 On `SIGTERM` or `SIGINT`, `src/index.js` stops the auto-sync timer,
 closes the HTTP server (draining in-flight requests), and exits. A

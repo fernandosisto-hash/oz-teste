@@ -177,6 +177,7 @@ function startWebhookReceiver() {
     const health = await request(port, { method: 'GET', path: '/health' });
     assert.equal(health.status, 200);
     assert.equal(health.body.status, 'ok');
+    assert.equal(health.body.checks.storage.ok, true);
     assert.equal(health.body.dispatch.defaultExecutionMode, 'miguel');
     assert.equal(health.body.dispatch.resolvedDefaultMode, 'local');
     assert.deepEqual(health.body.dispatch.miguel.order, ['webhook', 'oz', 'local']);
@@ -185,6 +186,7 @@ function startWebhookReceiver() {
     assert.equal(info.status, 200);
     assert.ok(info.body.dispatch.validModes.includes('miguel'));
     assert.equal(info.body.dispatch.miguel.localFallback, true);
+    assert.equal(info.body.env.defaultExecutionMode, 'miguel');
     console.log('[ok] /health and /info expose miguel runtime data');
 
     // ---------------------------------------------------------------
