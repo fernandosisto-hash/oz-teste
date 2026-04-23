@@ -163,7 +163,7 @@ function startMockOz() {
     const notificationStore = require('../src/store/notificationStore');
     const syncService = require('../src/syncService');
 
-    const t1 = taskStore.add({
+    const t1 = await taskStore.add({
       title: 'local task',
       description: 'terminates synchronously',
       executionMode: 'local',
@@ -190,7 +190,7 @@ function startMockOz() {
     assert.equal(payload.dispatchMode, 'local');
     console.log('[ok] dispatch(local) emitted exactly one notification');
 
-    const stored1 = notificationStore.getByTaskId(t1.id);
+    const stored1 = await notificationStore.getByTaskId(t1.id);
     assert.equal(stored1.length, 1, 'one persisted event');
     assert.equal(stored1[0].taskId, t1.id);
     assert.equal(stored1[0].delivery.ok, true);
@@ -205,7 +205,7 @@ function startMockOz() {
     assert.equal(retry.reason, 'already_notified');
     assert.equal(webhook.received.length, beforeCount, 'no duplicate webhook');
     assert.equal(
-      notificationStore.getByTaskId(t1.id).length,
+      (await notificationStore.getByTaskId(t1.id)).length,
       1,
       'no duplicate persisted event',
     );
@@ -217,7 +217,7 @@ function startMockOz() {
     mockOz = await startMockOz();
     process.env.WARP_API_BASE = `http://127.0.0.1:${mockOz.port}`;
 
-    const t2 = taskStore.add({
+    const t2 = await taskStore.add({
       title: 'oz task',
       description: 'finishes after a few sync ticks',
       executionMode: 'oz',
@@ -226,9 +226,9 @@ function startMockOz() {
     // Mock scripts 4 INPROGRESS before SUCCEEDED, so dispatch's 3-poll
     // window leaves it in_progress. No notification yet.
     assert.equal(afterOzDispatch.status, 'in_progress');
-    assert.equal(afterOzDispatch.notifiedAt, undefined);
+    assert.equal(afterOzDispatch.notifiedAt == null, true);
     assert.equal(
-      notificationStore.getByTaskId(t2.id).length,
+      (await notificationStore.getByTaskId(t2.id)).length,
       0,
       'no notification emitted while still in_progress',
     );
@@ -243,7 +243,7 @@ function startMockOz() {
     }
     assert.ok(terminalHit, 'expected sync to reach terminal state');
 
-    const finalT2 = taskStore.getById(t2.id);
+    const finalT2 = await taskStore.getById(t2.id);
     assert.equal(finalT2.status, 'done');
     assert.ok(finalT2.notifiedAt);
     assert.equal(finalT2.notifiedStatus, 'done');
@@ -252,7 +252,7 @@ function startMockOz() {
     await syncService.syncTask(t2.id);
     await syncService.syncTask(t2.id);
 
-    const t2Events = notificationStore.getByTaskId(t2.id);
+    const t2Events = await notificationStore.getByTaskId(t2.id);
     assert.equal(
       t2Events.length,
       1,
@@ -280,7 +280,7 @@ function startMockOz() {
     webhook = await startWebhookReceiver({ failWith: 500 });
     process.env.NOTIFICATION_WEBHOOK_URL = `http://127.0.0.1:${webhook.port}/hook`;
 
-    const t3 = taskStore.add({
+    const t3 = await taskStore.add({
       title: 'fails to deliver',
       executionMode: 'local',
     });
@@ -288,7 +288,7 @@ function startMockOz() {
     assert.equal(afterT3.status, 'done');
     assert.ok(afterT3.notifiedAt, 'task still stamped as notified');
 
-    const t3Events = notificationStore.getByTaskId(t3.id);
+    const t3Events = await notificationStore.getByTaskId(t3.id);
     assert.equal(t3Events.length, 1);
     assert.equal(t3Events[0].delivery.ok, false);
     assert.equal(t3Events[0].delivery.httpStatus, 500);
@@ -302,13 +302,13 @@ function startMockOz() {
     // 5. no webhook configured -> event still persisted, delivery.attempted=false
     // ---------------------------------------------------------------
     delete process.env.NOTIFICATION_WEBHOOK_URL;
-    const t4 = taskStore.add({
+    const t4 = await taskStore.add({
       title: 'no webhook',
       executionMode: 'local',
     });
     const afterT4 = await dispatcher.dispatch(t4, { mode: 'local' });
     assert.equal(afterT4.status, 'done');
-    const t4Events = notificationStore.getByTaskId(t4.id);
+    const t4Events = await notificationStore.getByTaskId(t4.id);
     assert.equal(t4Events.length, 1);
     assert.equal(t4Events[0].delivery.attempted, false);
     assert.equal(t4Events[0].delivery.reason, 'no_webhook_configured');

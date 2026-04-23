@@ -134,7 +134,7 @@ function startMockOz() {
     const syncService = require('../src/syncService');
 
     // --- 1. create task --------------------------------------------------
-    const created = taskStore.add({
+    const created = await taskStore.add({
       title: 'hello auto-sync',
       description: 'end-to-end autosync validation',
       executionMode: 'oz',
@@ -189,11 +189,11 @@ function startMockOz() {
     console.log('[ok] syncing a terminal task is a no-op');
 
     // --- 5. error path: forge a task with an unknown runId --------------
-    const broken = taskStore.add({
+    const broken = await taskStore.add({
       title: 'broken runId',
       executionMode: 'oz',
     });
-    taskStore.updateExecution(broken.id, {
+    await taskStore.updateExecution(broken.id, {
       status: 'in_progress',
       dispatchMode: 'oz',
       runId: 'run-does-not-exist',
@@ -224,11 +224,11 @@ function startMockOz() {
     // --- 7. auto-sync loop smoke test -----------------------------------
     // Prove that startAutoSync/stopAutoSync actually tick. We reuse the
     // broken task; each tick should append another lastError write.
-    const before = taskStore.getById(broken.id).updatedAt;
+    const before = (await taskStore.getById(broken.id)).updatedAt;
     syncService.startAutoSync({ intervalMs: 500 });
     await new Promise((r) => setTimeout(r, 1300));
     syncService.stopAutoSync();
-    const after = taskStore.getById(broken.id).updatedAt;
+    const after = (await taskStore.getById(broken.id)).updatedAt;
     assert.notEqual(before, after, 'expected auto-sync tick to update task');
     console.log('[ok] startAutoSync/stopAutoSync ticked at least once');
 

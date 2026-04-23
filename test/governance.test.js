@@ -163,28 +163,28 @@ function request(port, { method, path: urlPath, headers = {}, body = null }) {
     // in which candidates are walked; the actual Oz API call errors
     // out (unknown run) and records lastError in order.
     const now = Date.now();
-    const low = taskStore.add({
+    const low = await taskStore.add({
       title: 'low', executionMode: 'oz', priority: 'low',
     });
-    taskStore.updateExecution(low.id, {
+    await taskStore.updateExecution(low.id, {
       status: 'in_progress',
       dispatchMode: 'oz',
       runId: 'r-low',
       dispatchedAt: new Date(now).toISOString(),
     });
-    const high = taskStore.add({
+    const high = await taskStore.add({
       title: 'high', executionMode: 'oz', priority: 'high',
     });
-    taskStore.updateExecution(high.id, {
+    await taskStore.updateExecution(high.id, {
       status: 'in_progress',
       dispatchMode: 'oz',
       runId: 'r-high',
       dispatchedAt: new Date(now + 5).toISOString(),
     });
-    const normal = taskStore.add({
+    const normal = await taskStore.add({
       title: 'normal', executionMode: 'oz', priority: 'normal',
     });
-    taskStore.updateExecution(normal.id, {
+    await taskStore.updateExecution(normal.id, {
       status: 'in_progress',
       dispatchMode: 'oz',
       runId: 'r-normal',
@@ -195,7 +195,9 @@ function request(port, { method, path: urlPath, headers = {}, body = null }) {
     const bulk = await syncService.syncInProgressTasks();
     // Results come back in processing order. All three will fail (no
     // mock), but we can match by the embedded runId -> task id.
-    const idsInOrder = bulk.map((r) => r.task.id);
+    const idsInOrder = bulk
+      .map((r) => r.task.id)
+      .filter((id) => [high.id, normal.id, low.id].includes(id));
     assert.deepEqual(idsInOrder, [high.id, normal.id, low.id]);
     console.log('[ok] bulk sync walks candidates in high->normal->low order');
 
@@ -218,7 +220,7 @@ function request(port, { method, path: urlPath, headers = {}, body = null }) {
     assert.ok(cancelled.body.notifiedAt, 'terminal notification fired on cancel');
     assert.equal(cancelled.body.notifiedStatus, 'cancelled');
 
-    const cancelEvents = notificationStore.getByTaskId(toCancel.body.id);
+    const cancelEvents = await notificationStore.getByTaskId(toCancel.body.id);
     assert.equal(cancelEvents.length, 1);
     assert.equal(cancelEvents[0].status, 'cancelled');
 
@@ -295,7 +297,7 @@ function request(port, { method, path: urlPath, headers = {}, body = null }) {
     // via the store bypasses the done->failed transition guard (which
     // we validate separately below); the retry endpoint itself is
     // what we care about here.
-    taskStore.updateExecution(retryable.body.id, { status: 'failed' });
+    await taskStore.updateExecution(retryable.body.id, { status: 'failed' });
     // retryCount already 1, maxRetries=1 -> budget exhausted
     const retryExhausted = await request(port, {
       method: 'POST',
@@ -310,20 +312,20 @@ function request(port, { method, path: urlPath, headers = {}, body = null }) {
     // ---------------------------------------------------------------
     // 6. timeout: stale in_progress task -> failed on sync
     // ---------------------------------------------------------------
-    const stuck = taskStore.add({
+    const stuck = await taskStore.add({
       title: 'stuck task',
       executionMode: 'oz',
       timeoutMs: 1000,
     });
     // Pretend it was dispatched 10s ago (well beyond timeout).
     const tenSecAgo = new Date(Date.now() - 10_000).toISOString();
-    taskStore.updateExecution(stuck.id, {
+    await taskStore.updateExecution(stuck.id, {
       status: 'in_progress',
       dispatchMode: 'oz',
       runId: 'r-stuck',
       dispatchedAt: tenSecAgo,
     });
-    assert.equal(governance.hasTimedOut(taskStore.getById(stuck.id)), true);
+    assert.equal(governance.hasTimedOut(await taskStore.getById(stuck.id)), true);
 
     const timedOut = await syncService.syncTask(stuck.id);
     assert.equal(timedOut.ok, true);
@@ -332,7 +334,7 @@ function request(port, { method, path: urlPath, headers = {}, body = null }) {
     assert.equal(timedOut.task.status, 'failed');
     assert.equal(timedOut.task.timedOut, true);
     assert.ok(/timed out/i.test(timedOut.task.lastError));
-    const stuckEvents = notificationStore.getByTaskId(stuck.id);
+    const stuckEvents = await notificationStore.getByTaskId(stuck.id);
     assert.equal(stuckEvents.length, 1);
     assert.equal(stuckEvents[0].status, 'failed');
     console.log('[ok] timeout: stale task marked failed + notification emitted');
